@@ -1,0 +1,77 @@
+# Proofdrill agent
+
+> **Status: early development. This agent does not do anything yet.**
+> There is no release, no published image, and nothing here to run. The
+> repository exists so that the design can be read while it is being built.
+
+Proofdrill proves that a database backup restores — and that the restored
+database still enforces the guarantees the original enforced.
+
+This repository holds **the part that runs on your machines**. It pulls a backup
+artefact from your own storage, restores it into a throwaway PostgreSQL, checks
+what survived, and sends back a report. The service that schedules the drills and
+keeps their history never receives a row of your data.
+
+## Why this is open source
+
+Because you should not have to take our word for what runs inside your
+infrastructure. The agent holds credentials to your backup storage and starts a
+database from your data; both of those are things you are entitled to read before
+you run them.
+
+## How a drill will work
+
+```
+  1. pull the artefact from your storage    (your credentials, never ours)
+  2. start a throwaway PostgreSQL
+  3. restore into it
+  4. run the assertion pack
+  5. send back the signed report            (the report only — never the data)
+  6. destroy everything it created
+```
+
+The assertions come in four levels. The first is what backup tooling usually
+checks; the third is the one that matters and that nobody else does:
+
+1. **Did the restore happen?** The artefact exists and is inside its window, the
+   restore exits clean, the expected tables are there, the counts are within
+   tolerance.
+2. **Is it still that database?** Extensions, sequences, constraints, foreign
+   keys, roles, grants, functions, triggers.
+3. **Do the guarantees still hold?** Row-level security enabled *and forced*
+   where it was. Identical policies. The application role still cannot read
+   another tenant's rows. No role gained `BYPASSRLS`. Your own SQL assertions
+   still return true.
+4. **The numbers you owe somebody.** Measured RPO from the age of the artefact,
+   measured RTO from the real duration of the restore.
+
+A backup that restores with every row in place and row-level security missing is
+not a successful restore. It is a data breach with green counts.
+
+## What this agent will never do
+
+These are constraints on the design, not aspirations:
+
+- **It never connects to your live database.** It reads a backup artefact and
+  restores into a container it created.
+- **It never sends your data anywhere.** Only the report leaves, and you can read
+  the code that decides what goes into it.
+- **It accepts no inbound connection.** It polls outward, so there is no port to
+  open and no firewall change to request.
+- **It needs no privileged access** — no Docker socket, no host root.
+- **It does not update itself.** The service tells you when your agent is old;
+  you decide when to replace it. Software that downloads and runs new code by
+  itself, inside your perimeter, is what your own security questionnaire asks you
+  not to run.
+- **It cleans up after itself**, including after a failure, and runs under
+  explicit resource limits. It is running on your machine, not ours.
+
+## Running it
+
+Not yet. When there is something to run, it will be one `docker run` with your
+storage credentials as environment variables, and a `doctor` subcommand that
+checks the configuration without restoring anything.
+
+## Licence
+
+See [LICENSE](LICENSE).

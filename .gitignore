@@ -1,0 +1,25 @@
+# Build output
+bin/
+obj/
+dist/
+out/
+
+# Local configuration and anything that could carry a credential
+*.env
+.env.*
+!env.example
+*.pem
+*.key
+secrets/
+
+# Working directories the agent uses while a drill runs
+work/
+artefacts/
+
+# Editors and OS
+.vs/
+.vscode/
+.idea/
+*.user
+.DS_Store
+Thumbs.db
