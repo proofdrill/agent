@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+# Anything that is read by a shell or a container must be LF, whatever the
+# workstation checking it out does by default. A CRLF shebang inside a container
+# fails with "bad interpreter: no such file or directory", which names the
+# interpreter and not the line ending, and costs an hour the first time.
+*.sh    text eol=lf
+Dockerfile text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+
+# Binary, so git never tries to be helpful with them.
+*.png   binary
+*.dump  binary
