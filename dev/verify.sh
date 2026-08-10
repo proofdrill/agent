@@ -17,6 +17,13 @@
 #
 # The third is the product's founding failure: an archive that is well formed,
 # restores with exit code 0, and carries nothing.
+#
+# NOT COVERED, and said here rather than discovered later: there is no test in
+# which a level 3 comparison legitimately FAILS. Making one end to end needs a
+# restore that loses a guarantee, and every way of manufacturing that is either
+# contrived or closed by the agent itself. The comparison has been watched
+# failing by hand — role ordering, before it was canonicalised — but that is not
+# an assertion. Unit tests over SecurityDdl.Compare are where this belongs.
 set -uo pipefail
 
 PG_MAJOR="$(ls /usr/lib/postgresql | sort -n | tail -1)"
@@ -48,7 +55,11 @@ pg_ctl -D "$SRC_DATA" -o "-k $SRC_SOCK -h ''" -w -l /work/source.log start >/dev
 export PGHOST="$SRC_SOCK" PGUSER=source
 
 psql -q -v ON_ERROR_STOP=1 -d postgres -c 'CREATE ROLE app_role NOLOGIN'
-for database in with_roles without_roles empty_table; do
+# A quoted name with a space in it, because they exist and because a policy that
+# names a role which cannot be recreated does not restore — leaving a table with
+# row level security enabled and no policy on it.
+psql -q -v ON_ERROR_STOP=1 -d postgres -c 'CREATE ROLE "Reporting Role" NOLOGIN'
+for database in with_roles without_roles empty_table enabled_not_forced; do
   psql -q -v ON_ERROR_STOP=1 -d postgres -c "CREATE DATABASE $database"
   psql -q -v ON_ERROR_STOP=1 -d "$database" <<'SQL'
 CREATE TABLE tenant_rows (
@@ -57,14 +68,25 @@ CREATE TABLE tenant_rows (
   payload   text NOT NULL
 );
 ALTER TABLE tenant_rows ENABLE ROW LEVEL SECURITY;
-ALTER TABLE tenant_rows FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON tenant_rows
   USING (tenant_id::text = current_setting('app.tenant_id', true));
 SQL
 done
 
+# Everything except enabled_not_forced is FORCED, which is the distinction the
+# whole product turns on: enabled leaves the table owner exempt, forced does not.
+for database in with_roles without_roles empty_table; do
+  psql -q -v ON_ERROR_STOP=1 -d "$database" -c 'ALTER TABLE tenant_rows FORCE ROW LEVEL SECURITY'
+done
+
+# Policies that name roles. Before the agent learned to read a policy's own TO
+# clause these did not restore at all, and what was left was a table with row
+# level security enabled and no policy on it.
+psql -q -v ON_ERROR_STOP=1 -d with_roles -c \
+  "CREATE POLICY reporting_read ON tenant_rows FOR SELECT TO app_role, \"Reporting Role\" USING (true)"
+
 # empty_table deliberately keeps no rows: that is the artefact under test.
-for database in with_roles without_roles; do
+for database in with_roles without_roles enabled_not_forced; do
   psql -q -v ON_ERROR_STOP=1 -d "$database" -c \
     "INSERT INTO tenant_rows (tenant_id, payload) SELECT gen_random_uuid(), repeat('x', 200) FROM generate_series(1, 20000)"
 done
@@ -75,6 +97,7 @@ psql -q -v ON_ERROR_STOP=1 -d with_roles -c 'GRANT SELECT, INSERT ON tenant_rows
 pg_dump -Fc -d with_roles    -f /work/with-roles.dump
 pg_dump -Fc -d without_roles -f /work/without-roles.dump
 pg_dump -Fc -d empty_table   -f /work/empty-table.dump
+pg_dump -Fc -d enabled_not_forced -f /work/enabled-not-forced.dump
 note "with-roles.dump    $(du -h /work/with-roles.dump | cut -f1)"
 note "without-roles.dump $(du -h /work/without-roles.dump | cut -f1)"
 note "empty-table.dump   $(du -h /work/empty-table.dump | cut -f1)"
@@ -98,6 +121,33 @@ expect "drill passes level 1 on an artefact with a grant" 0 "$?"
 
 proofdrill drill --dump-file /work/without-roles.dump --rpo-window-hours 24
 expect "drill passes level 1 without a grant" 0 "$?"
+
+# ---------------------------------------------------------------------------
+say "2b. level 3 — the guarantees, and the enforcement behind them"
+# ---------------------------------------------------------------------------
+LEVEL3="$(proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 --json)"
+for key in rls_enabled_and_forced_preserved policies_identical grants_identical \
+           row_level_security_actually_restricts; do
+  if printf '%s' "$LEVEL3" | tr -d ' \n' | grep -q "\"key\":\"$key\",\"outcome\":\"passed\""; then
+    printf '  [pass] %s\n' "$key"
+  else
+    printf '  [FAIL] %s did not pass\n' "$key"
+    FAILURES=$((FAILURES + 1))
+  fi
+done
+
+# The policy naming a quoted role must have survived; two policies went in.
+if printf '%s' "$LEVEL3" | grep -q 'Reporting Role'; then
+  printf '  [pass] a policy naming a quoted role survived the round trip\n'
+else
+  printf '  [FAIL] the policy naming "Reporting Role" is not in the report\n'
+  FAILURES=$((FAILURES + 1))
+fi
+
+say "2c. enabled is not forced, and the report must not blur them"
+proofdrill drill --dump-file /work/enabled-not-forced.dump --rpo-window-hours 24 \
+  | grep -q "no table with row level security FORCED"
+expect "an enabled but unforced table is named as such" 0 "$?"
 
 # ---------------------------------------------------------------------------
 say "3. a valid archive with no rows must FAIL — the founding failure"

@@ -6,8 +6,7 @@ namespace Proofdrill.Agent;
 internal sealed record ArtefactContents(
     IReadOnlyList<string> Tables,
     IReadOnlyList<string> ReferencedRoles,
-    bool DeclaresRowLevelSecurity,
-    int PolicyCount);
+    GuaranteeSet Declared);
 
 /// <summary>
 /// Reads a custom-format archive without restoring it — which is what
@@ -43,14 +42,10 @@ internal static partial class ArtefactInspector
             timeout: TimeSpan.FromMinutes(5),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        var tables = ParseTables(toc.StandardOutput);
-        var roles = ParseReferencedRoles(toc.StandardOutput, ddl.StandardOutput);
-
         return new ArtefactContents(
-            tables,
-            roles,
-            ddl.StandardOutput.Contains("ROW LEVEL SECURITY", StringComparison.Ordinal),
-            CreatePolicy().Matches(ddl.StandardOutput).Count);
+            ParseTables(toc.StandardOutput),
+            ParseReferencedRoles(toc.StandardOutput, ddl.StandardOutput),
+            SecurityDdl.Extract(ddl.StandardOutput));
     }
 
     /// <summary>
@@ -141,6 +136,19 @@ internal static partial class ArtefactInspector
             Add(roles, match.Groups["role"].Value);
         }
 
+        // A policy's own TO clause, and it is not an afterthought: a policy that
+        // names a role which does not exist FAILS to restore, and what is left is
+        // a table with row level security enabled and no policy on it. That is not
+        // a missing grant — it is a table whose rules are gone while the switch
+        // that says it has rules is still on.
+        foreach (Match match in PolicyRoles().Matches(ddl))
+        {
+            foreach (var name in match.Groups["roles"].Value.Split(','))
+            {
+                Add(roles, name);
+            }
+        }
+
         return [.. roles];
     }
 
@@ -154,9 +162,14 @@ internal static partial class ArtefactInspector
             return;
         }
 
-        if (name.StartsWith('"') && name.EndsWith('"') && name.Length > 1)
+        // A quoted identifier is the one case where whitespace and capitals are
+        // legitimate — `"Reporting Role"` is a perfectly ordinary role name — so
+        // the quoting is remembered and the rejection below applies only to bare
+        // identifiers, where whitespace really does mean the parse went wrong.
+        var wasQuoted = name.Length > 1 && name.StartsWith('"') && name.EndsWith('"');
+        if (wasQuoted)
         {
-            name = name[1..^1];
+            name = name[1..^1].Replace("\"\"", "\"", StringComparison.Ordinal);
         }
 
         // PUBLIC is the implicit everybody, not a role that has to exist, and
@@ -166,9 +179,9 @@ internal static partial class ArtefactInspector
             return;
         }
 
-        // Anything with whitespace or a bracket in it is a parse that went wrong,
-        // and a wrong role name in a report is worse than a missing one.
-        if (name.AsSpan().ContainsAny(" \t()") || name.Length > 63)
+        // An unquoted name with whitespace or a bracket in it is a parse that went
+        // wrong, and a wrong role name in a report is worse than a missing one.
+        if ((!wasQuoted && name.AsSpan().ContainsAny(" \t()")) || name.Length is 0 or > 63)
         {
             return;
         }
@@ -183,6 +196,7 @@ internal static partial class ArtefactInspector
     [GeneratedRegex(@"\bOWNER\s+TO\s+(?<role>[^\s;]+)\s*;", RegexOptions.IgnoreCase)]
     private static partial Regex OwnerTo();
 
-    [GeneratedRegex(@"^\s*CREATE\s+POLICY\b", RegexOptions.Multiline | RegexOptions.IgnoreCase)]
-    private static partial Regex CreatePolicy();
+    [GeneratedRegex(@"^\s*CREATE\s+POLICY\b[^;]*?\sTO\s+(?<roles>[^;]*?)(?:\s+USING\b|\s+WITH\s+CHECK\b|\s*;)",
+        RegexOptions.Multiline | RegexOptions.IgnoreCase)]
+    private static partial Regex PolicyRoles();
 }

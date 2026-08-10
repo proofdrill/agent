@@ -41,6 +41,7 @@ internal sealed record DrillReport(
     ArtefactFacts Artefact,
     Measurements Measurements,
     IReadOnlyList<Check> Level1,
+    IReadOnlyList<Check> Level3,
     IReadOnlyDictionary<string, long> RowCounts,
     IReadOnlyList<string> Observations,
     IReadOnlyList<string> NotAttempted)

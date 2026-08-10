@@ -25,6 +25,7 @@ internal sealed class PostgresBinaries
     public string InitDb => Path.Combine(BinDirectory, "initdb");
     public string PgCtl => Path.Combine(BinDirectory, "pg_ctl");
     public string PgRestore => Path.Combine(BinDirectory, "pg_restore");
+    public string PgDump => Path.Combine(BinDirectory, "pg_dump");
     public string Psql => Path.Combine(BinDirectory, "psql");
 
     /// <summary>Majors present in this image, ascending. Empty outside the image.</summary>

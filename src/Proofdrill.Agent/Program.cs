@@ -135,10 +135,22 @@ void Print(DrillReport report)
     Console.WriteLine($"  PostgreSQL     {report.PostgresMajor}");
     Console.WriteLine();
 
+    Console.WriteLine("  level 1 — did the restore happen?");
     foreach (var check in report.Level1)
     {
         Console.WriteLine($"  [{Mark(check.Outcome)}] {check.Key}");
         Console.WriteLine($"      {check.Detail}");
+    }
+
+    if (report.Level3.Count > 0)
+    {
+        Console.WriteLine();
+        Console.WriteLine("  level 3 — do the guarantees still hold?");
+        foreach (var check in report.Level3)
+        {
+            Console.WriteLine($"  [{Mark(check.Outcome)}] {check.Key}");
+            Console.WriteLine($"      {check.Detail}");
+        }
     }
 
     if (report.RowCounts.Count > 0)

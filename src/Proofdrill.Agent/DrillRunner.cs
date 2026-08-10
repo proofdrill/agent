@@ -108,7 +108,10 @@ internal static partial class DrillRunner
         var contents = await ArtefactInspector.ReadAsync(binaries, options.ArtefactPath, cancellationToken)
             .ConfigureAwait(false);
 
-        observations.Add($"the artefact declares {contents.Tables.Count} table(s) and {contents.PolicyCount} policy(ies)");
+        observations.Add(
+            $"the artefact declares {contents.Tables.Count} table(s), {contents.Declared.Policies.Count} policy(ies), " +
+            $"{contents.Declared.RowLevelSecurity.Count} row level security statement(s) and " +
+            $"{contents.Declared.Grants.Count} grant(s)");
         if (contents.ReferencedRoles.Count > 0)
         {
             observations.Add($"the artefact references role(s): {string.Join(", ", contents.ReferencedRoles)}");
@@ -126,7 +129,7 @@ internal static partial class DrillRunner
             return new DrillReport(
                 DrillReport.CurrentVersion, Outcome.CouldNotAttempt, AgentVersion(), major,
                 startedAt, artefactFacts, new Measurements(Math.Round(ageHours, 2), null),
-                checks, rowCounts, observations, notAttempted);
+                checks, [], rowCounts, observations, notAttempted);
         }
 
         Directory.CreateDirectory(options.WorkRoot);
@@ -256,31 +259,170 @@ internal static partial class DrillRunner
                 "what the real application role could read cannot be established from this artefact alone.");
         }
 
-        var rls = await cluster.QueryAsync(RestoredDatabase,
-            """
-            SELECT n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity
-            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-              AND c.relrowsecurity
-            ORDER BY 1
-            """, cancellationToken).ConfigureAwait(false);
+        // ---- level 3: do the guarantees still hold? -------------------------
+        //
+        // The restored database is dumped with the same pg_dump that wrote the
+        // artefact, so both sides of the comparison go through one normalisation
+        // and a difference means a difference. See SecurityDdl for why reading
+        // pg_policies instead would report every policy as changed.
+        var level3 = new List<Check>();
 
-        foreach (var row in ThrowawayCluster.Rows(rls))
+        var restoredDdl = await Processes.RunAsync(
+            binaries.PgDump,
+            ["--section", "pre-data", "--section", "post-data", "--file", "-", "--dbname", RestoredDatabase],
+            cluster.Environment(),
+            TimeSpan.FromMinutes(10),
+            cancellationToken).ConfigureAwait(false);
+
+        if (!restoredDdl.Succeeded)
         {
-            if (row.Length == 3)
+            throw new DrillCannotBeAttemptedException(
+                restoredDdl.Describe("dumping the restored database to compare its guarantees"));
+        }
+
+        var restored = SecurityDdl.Extract(restoredDdl.StandardOutput);
+
+        Compare(level3, "rls_enabled_and_forced_preserved",
+            contents.Declared.RowLevelSecurity, restored.RowLevelSecurity,
+            "row level security statement");
+        Compare(level3, "policies_identical",
+            contents.Declared.Policies, restored.Policies, "policy");
+        Compare(level3, "grants_identical",
+            contents.Declared.Grants, restored.Grants, "grant");
+
+        // Behaviour, not flags. Rule 7 of this repository: the agent is superuser
+        // of its own cluster and a superuser bypasses row level security, so
+        // "I could read the table" proves nothing. The owner is the interesting
+        // role, because FORCE ROW LEVEL SECURITY exists precisely so that the
+        // owner is not exempt.
+        var forced = ThrowawayCluster.Rows(await cluster.QueryAsync(RestoredDatabase,
+            """
+            SELECT n.nspname || '.' || c.relname, pg_get_userbyid(c.relowner)
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'r' AND c.relrowsecurity AND c.relforcerowsecurity
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            ORDER BY 1
+            """, cancellationToken).ConfigureAwait(false)).Where(row => row.Length == 2).ToList();
+
+        if (forced.Count == 0)
+        {
+            notAttempted.Add(
+                "level 3, enforcement: the restored database has no table with row level security FORCED, so there " +
+                "is no owner-level restriction to demonstrate. Enabled without forced leaves the owner exempt.");
+        }
+        else
+        {
+            const int Ceiling = 25;
+            var probed = forced.Take(Ceiling).ToList();
+            if (forced.Count > probed.Count)
             {
-                observations.Add($"{row[0]}: row level security enabled={row[1]}, forced={row[2]}");
+                // Never a silent cap: a truncated check that reads as a complete
+                // one is how a report starts overstating what it covered.
+                observations.Add(
+                    $"enforcement was probed on {probed.Count} of {forced.Count} forced tables (per run ceiling)");
+            }
+
+            var restricting = new List<string>();
+            var unrestricted = new List<string>();
+
+            foreach (var row in probed)
+            {
+                var owner = row[1].Replace("\"", "\"\"", StringComparison.Ordinal);
+                var asOwner = await cluster.QueryAsync(RestoredDatabase,
+                    $"SET ROLE \"{owner}\"; SELECT count(*) FROM {row[0]}", cancellationToken).ConfigureAwait(false);
+
+                if (!asOwner.Succeeded || !long.TryParse(asOwner.StandardOutput.Trim(), out var visible))
+                {
+                    unrestricted.Add($"{row[0]} (could not be read as {row[1]})");
+                    continue;
+                }
+
+                var total = rowCounts.GetValueOrDefault(row[0], 0);
+                (visible < total ? restricting : unrestricted).Add(
+                    $"{row[0]}: {visible} of {total} rows visible to {row[1]}");
+            }
+
+            if (unrestricted.Count == 0)
+            {
+                level3.Add(new Check("row_level_security_actually_restricts", Outcome.Passed,
+                    $"with no tenant context set, the owner sees fewer rows than the whole table on all " +
+                    $"{restricting.Count} forced table(s): {string.Join("; ", restricting)}"));
+            }
+            else
+            {
+                // Deliberately not a verdict. A policy that is legitimately
+                // permissive produces exactly this reading, and check
+                // rls_enabled_and_forced_preserved above already catches the case
+                // where the guarantee did not survive the restore. Crying wolf
+                // here would cost more than the extra certainty is worth.
+                level3.Add(new Check("row_level_security_actually_restricts", Outcome.CouldNotAttempt,
+                    $"the owner still sees every row of {string.Join("; ", unrestricted)}. That is what a policy " +
+                    "which permits everything looks like, and it is also what a lost guarantee looks like; the two " +
+                    "are told apart by a customer SQL assertion, which this build does not support."));
             }
         }
 
-        notAttempted.Add("level 2 and level 3 verdicts: not implemented yet, so nothing above is judged as one");
+        notAttempted.Add(
+            "level 3, role attributes: whether any role holds BYPASSRLS cannot be read from a per-database artefact, " +
+            "because role attributes live in the cluster globals.");
+        notAttempted.Add("level 3, customer SQL assertions: not implemented yet");
+        notAttempted.Add("level 2 entirely: extensions, sequences, constraints, foreign keys, functions and triggers");
 
-        var outcome = checks.Any(c => c.Outcome == Outcome.Failed) ? Outcome.Failed : Outcome.Passed;
+        // A level 3 failure is a failed drill. That is the whole product: a backup
+        // that restores with every row in place and its guarantees missing is not
+        // a successful restore. A could-not-attempt never lowers the verdict — it
+        // is a correction, and corrections do not decide anything.
+        var outcome = checks.Concat(level3).Any(c => c.Outcome == Outcome.Failed)
+            ? Outcome.Failed
+            : Outcome.Passed;
 
         return new DrillReport(
             DrillReport.CurrentVersion, outcome, AgentVersion(), major, startedAt, artefactFacts,
             new Measurements(Math.Round(ageHours, 2), Math.Round(clock.Elapsed.TotalSeconds, 3)),
-            checks, rowCounts, observations, notAttempted);
+            checks, level3, rowCounts, observations, notAttempted);
+    }
+
+    /// <summary>
+    /// One guarantee compared in both directions. A restored database that
+    /// <em>gained</em> a policy is as much a finding as one that lost it: either
+    /// way it is not the database the artefact describes.
+    /// </summary>
+    private static void Compare(
+        List<Check> checks,
+        string key,
+        IReadOnlySet<string> declared,
+        IReadOnlySet<string> restored,
+        string noun)
+    {
+        if (declared.Count == 0)
+        {
+            checks.Add(new Check(key, Outcome.CouldNotAttempt,
+                $"the artefact declares no {noun}, so there is nothing to preserve. " +
+                (restored.Count == 0 ? "" : $"The restored database has {restored.Count}, which it should not.")));
+            return;
+        }
+
+        var (lost, gained) = SecurityDdl.Compare(declared, restored);
+
+        if (lost.Count == 0 && gained.Count == 0)
+        {
+            checks.Add(new Check(key, Outcome.Passed,
+                $"all {declared.Count} {noun}(s) the artefact declares are present in the restored database, identical"));
+            return;
+        }
+
+        var detail = new List<string>();
+        if (lost.Count > 0)
+        {
+            detail.Add($"lost: {string.Join(" | ", lost)}");
+        }
+
+        if (gained.Count > 0)
+        {
+            detail.Add($"appeared: {string.Join(" | ", gained)}");
+        }
+
+        checks.Add(new Check(key, Outcome.Failed, string.Join("; ", detail)));
     }
 
     private static async Task<int?> ReadSourceMajorAsync(
