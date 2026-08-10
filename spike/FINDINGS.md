@@ -30,9 +30,34 @@ a connection to `127.0.0.1:5432` is refused. `-h ''` is the load-bearing
 argument, and the homepage sentence — *no privileged access, no Docker socket,
 no inbound port* — is now true by construction.
 
-45 MB per major means a four-major matrix costs roughly 180 MB. §10.2 estimated
-"a few hundred MB" and that estimate holds; the objection to option B was the
-image size, and the image size is not a problem.
+### Correction, 2026-08-11, after building the real image
+
+**That 45 MB measured the wrong thing**, and the corrected number is worth more
+than the original. `du /usr/lib/postgresql` is the binaries directory alone; the
+`postgresql-17` package installs **303 MB** once its shared libraries are
+counted, and the finished agent image is **701 MB** with one major in it.
+
+Where it goes:
+
+| | |
+|---|---|
+| `/usr/lib/x86_64-linux-gnu` | 240 MB |
+| — of which `libLLVM.so.19.1` | **123 MB** |
+| `/usr/share/dotnet` | 80 MB |
+| `/usr/lib/postgresql` (the binaries) | 45 MB |
+| `/usr/share/postgresql` | 4 MB |
+
+**LLVM is there for JIT compilation, and a restore never uses it.** It is 18% of
+the image, and on an artefact that customers deliberately run vulnerability
+scanners against, it is also 18% of the scanning surface — for a feature we do
+not invoke. PostgreSQL loads its JIT provider only when `jit=on`, so setting
+`jit=off` and dropping the library is a plausible 123 MB, and it is the next
+cheap win rather than something done here on the way past.
+
+The four-major matrix is still not 4 × 303 MB: the binaries are per major and
+most of those libraries are shared. What it actually costs has to be measured by
+installing the second major, not extrapolated — extrapolating is what produced
+the wrong number the first time.
 
 ## 2. The finding: a plain `pg_dump` does not carry the authorization model
 

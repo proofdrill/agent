@@ -1,0 +1,22 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <WarningsAsErrors>nullable</WarningsAsErrors>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <!-- The control plane sets this false because it serves a user interface in
+         many languages. This is a command line tool whose every string is
+         English by decision, and turning globalization off means the image does
+         not have to carry ICU: a smaller image and a smaller scanning surface,
+         on an artefact that customers run security scanners against.
+         Consequence, and it is a real one: every comparison here is ordinal.
+         Nothing in this repository may sort or compare by culture. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Do not write a double hyphen anywhere in this file: XML forbids it
+         inside a comment, MSB4024 follows, and every property silently stops
+         applying. Learned on the control plane. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Proofdrill.Agent</RootNamespace>
+    <!-- The binary is `proofdrill`, because docs/03 §10.1 puts that word after
+         the image name: `docker run ghcr.io/proofdrill/agent:1 doctor`. The
+         control plane learned the matching lesson the hard way — an entrypoint
+         naming the project instead of the AssemblyName builds a perfect image
+         that fails when somebody runs it, with a message suggesting they
+         install an SDK. -->
+    <AssemblyName>proofdrill</AssemblyName>
+    <!-- No third party packages. Not a rule for its own sake: this repository
+         is read by people deciding whether to run it inside their perimeter,
+         and "what does it depend on" is the second question they ask. When the
+         first dependency arrives it should be because something could not be
+         written without it. -->
+  </PropertyGroup>
+
+</Project>

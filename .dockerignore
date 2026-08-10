@@ -1,0 +1,12 @@
+# The host's build output must never enter the build context. Its
+# project.assets.json records the absolute path of the NuGet folder that wrote
+# it; copied in, it overwrites the one the in-container restore just produced,
+# and the PUBLISH dies inside ResolvePackageAssets with a stack trace and no
+# sentence. The restore succeeds, which is what makes it confusing.
+**/bin/
+**/obj/
+
+.git/
+.github/
+spike/
+*.md

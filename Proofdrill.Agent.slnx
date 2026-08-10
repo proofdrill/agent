@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/" />
+  <Folder Name="/src/Agent/">
+    <Project Path="src/Proofdrill.Agent/Proofdrill.Agent.csproj" />
+  </Folder>
+</Solution>
