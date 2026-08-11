@@ -25,11 +25,20 @@ internal sealed record AssignedJob(
 /// to steal from a proxy log.
 /// </para>
 /// </summary>
-internal sealed class ControlPlane(HttpClient http, Uri origin, string agentId, string token)
+internal sealed class ControlPlane(
+    HttpClient http, Uri origin, string agentId, string token, PublishedKeys keys)
 {
     /// <summary>
     /// Asks for work. Null means there is nothing to do, which is the normal
     /// answer and not a failure.
+    /// <para>
+    /// <b>The answer is checked before it is read.</b> It is counter-signed with
+    /// the same key that counter-signs reports, published at
+    /// <c>/api/v1/keys</c>, and an answer that does not verify — or that carries
+    /// no signature at all — is refused rather than acted on. This does not
+    /// replace TLS; it means that what a machine inside somebody's perimeter was
+    /// told to do can be checked afterwards by somebody who was not there.
+    /// </para>
     /// </summary>
     public async Task<AssignedJob?> ClaimAsync(AgentIdentity identity, CancellationToken cancellationToken)
     {
@@ -58,6 +67,8 @@ internal sealed class ControlPlane(HttpClient http, Uri origin, string agentId, 
             throw new StorageException("the control plane answered a claim with something that is not JSON.");
         }
 
+        await VerifyAsync(document, cancellationToken).ConfigureAwait(false);
+
         if (document["job"] is not JsonObject job)
         {
             return null;
@@ -81,6 +92,46 @@ internal sealed class ControlPlane(HttpClient http, Uri origin, string agentId, 
                 PathStyle: !endpoint.Host.EndsWith("amazonaws.com", StringComparison.OrdinalIgnoreCase)),
             PostgresMajor: (int?)job["postgresMajor"]?.GetValue<int>(),
             RpoWindowHours: (double?)job["rpoWindowHours"]?.GetValue<int>());
+    }
+
+    /// <summary>
+    /// Checks the control plane's counter-signature on an answer, including the
+    /// one that says there is nothing to do.
+    /// <para>
+    /// <b>Every answer, and no exception for the empty one.</b> An answer that
+    /// silences an agent for a night is as useful to a forger as one that sends
+    /// it somewhere, and an agent that decides for itself when a signature is
+    /// required has a downgrade path: strip the block, and it accepts.
+    /// </para>
+    /// </summary>
+    private async Task VerifyAsync(JsonObject answer, CancellationToken cancellationToken)
+    {
+        if (answer["signature"] is not JsonObject signature
+            || signature["value"]?.GetValue<string>() is not { Length: > 0 } value
+            || signature["keyId"]?.GetValue<string>() is not { Length: > 0 } keyId)
+        {
+            throw new StorageException(
+                "the control plane's answer carries no counter-signature. This agent will not act on an "
+                + "instruction it cannot check, and a control plane that speaks this version of the job "
+                + "protocol always signs.");
+        }
+
+        if (signature["algorithm"]?.GetValue<string>() is { } algorithm
+            && algorithm != Signatures.CounterAlgorithm)
+        {
+            throw new StorageException(
+                $"the control plane signed its answer with {algorithm}, and this build only checks "
+                + $"{Signatures.CounterAlgorithm}.");
+        }
+
+        var key = await keys.ForAsync(keyId, cancellationToken).ConfigureAwait(false);
+
+        if (!Signatures.VerifyCounterSignature(JobAnswer.SignedBytes(answer), key, value))
+        {
+            throw new StorageException(
+                $"the control plane's answer does not verify against its published key '{keyId}'. Either it "
+                + "was altered between there and here, or something that is not your control plane answered.");
+        }
     }
 
     /// <summary>

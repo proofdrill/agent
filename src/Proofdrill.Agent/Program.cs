@@ -54,7 +54,7 @@ try
             return await DoctorAsync(command, stopping.Token).ConfigureAwait(false);
 
         case "verify":
-            return Verify(command);
+            return await VerifyAsync(command, stopping.Token).ConfigureAwait(false);
 
         case "run":
             return await RunAsync(command, stopping.Token).ConfigureAwait(false);
@@ -113,7 +113,7 @@ catch (Exception exception)
 // asymmetric. It checks OUR attestation, so it takes a public key and needs
 // nothing else of ours — §6 of the protocol prints the same check as three
 // lines of openssl, on purpose.
-int Verify(CommandLine command)
+async Task<int> VerifyAsync(CommandLine command, CancellationToken cancellationToken)
 {
     var envelope = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(command.Required("--report")))
         as System.Text.Json.Nodes.JsonObject
@@ -159,16 +159,55 @@ int Verify(CommandLine command)
         return CouldNotAttempt;
     }
 
-    if (command.Value("--public-key") is not { } keyPath)
+    // Which key signed this one. It is in the report because keys get rotated and
+    // a report has to stay verifiable after its own key is replaced — so this is
+    // what decides which key to fetch, rather than "the current one", which is
+    // the wrong answer for everything older than the last rotation.
+    var keyId = envelope["receipt"]?["counterSignature"]?["keyId"]?.GetValue<string>();
+
+    string pem;
+
+    if (command.Value("--public-key") is { } keyPath)
+    {
+        pem = File.ReadAllText(keyPath);
+    }
+    else if (command.Value("--control-plane") is { } origin)
+    {
+        if (keyId is null)
+        {
+            Console.Error.WriteLine("proofdrill: that receipt does not say which key signed it.");
+            return CouldNotAttempt;
+        }
+
+        // Fetched by id from the list the control plane publishes — one request,
+        // and the same one an auditor would make by hand with curl. The list
+        // keeps retired keys, so a report from two rotations ago still resolves.
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        using var response = await http
+            .GetAsync(new Uri(new Uri(origin), $"/api/v1/keys/{keyId}.pem"), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            Console.Error.WriteLine(
+                $"proofdrill: {origin} does not publish a key called '{keyId}' (HTTP " +
+                $"{(int)response.StatusCode}). A report naming a key its own control plane no longer publishes " +
+                "cannot be checked by anybody, which is worth knowing about a document somebody is relying on.");
+            return CouldNotAttempt;
+        }
+
+        pem = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+    }
+    else
     {
         Console.Error.WriteLine(
-            "proofdrill: pass --public-key to check the counter-signature. Without it this command can only say " +
-            "that a signature is present, which is not a check.");
+            "proofdrill: pass --public-key <file> or --control-plane <url> to check the counter-signature. " +
+            "Without one of them this command can only say that a signature is present, which is not a check.");
         return CouldNotAttempt;
     }
 
     using var key = System.Security.Cryptography.ECDsa.Create();
-    key.ImportFromPem(File.ReadAllText(keyPath));
+    key.ImportFromPem(pem);
 
     if (!Signatures.VerifyCounterSignature(canonical, key, signature))
     {
@@ -184,6 +223,7 @@ int Verify(CommandLine command)
     Console.WriteLine($"  VERIFIED   received {receivedAt}, and unchanged since");
     Console.WriteLine($"  outcome    {outcome}");
     Console.WriteLine($"  agent      {envelope["agent"]?["id"]} version {envelope["agent"]?["version"]}");
+    Console.WriteLine($"  key        {keyId ?? "unnamed"}");
     Console.WriteLine();
     return Passed;
 }
@@ -345,7 +385,13 @@ async Task<int> RunAsync(CommandLine command, CancellationToken cancellationToke
     var identity = new AgentIdentity(agentId, DrillRunner.AgentVersion(), Environment.MachineName);
 
     using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
-    var controlPlane = new ControlPlane(http, origin, agentId, token);
+
+    // The keys that check what this agent is told. Fetched on first need and
+    // again whenever the control plane signs with an id this process has not
+    // seen, which is what a rotation looks like from inside somebody's
+    // perimeter.
+    using var keys = new PublishedKeys(http, origin);
+    var controlPlane = new ControlPlane(http, origin, agentId, token, keys);
 
     Console.Error.WriteLine(
         $"proofdrill: asking {origin} for work every {pollSeconds}s. Nothing listens on this machine.");
@@ -619,6 +665,7 @@ static void Help()
           proofdrill drill --dump-file <path> [options]
           proofdrill drill --s3-endpoint <url> --s3-bucket <name> [options]
           proofdrill run --control-plane <url> [options]
+          proofdrill verify --report <file> [--public-key <file> | --control-plane <url>]
           proofdrill version
 
         doctor reaches the storage, finds the newest artefact, reads its age and
@@ -627,6 +674,22 @@ static void Help()
         run keeps asking your control plane for work and does what it is given.
         Everything is outbound: nothing listens on this machine, no port is
         opened, and no firewall rule is needed. The storage keys stay here.
+        Every answer it gets is counter-signed, and one that does not verify
+        against the control plane's published key is refused rather than obeyed.
+
+        verify checks a report you were handed. The counter-signature is the one
+        a third party checks, and it needs the public key of whichever key the
+        report names: pass the file, or an origin to fetch it from. The same
+        check is three lines of openssl — §6 of the published protocol — because
+        an auditor who has to install our tool to check our attestation has been
+        given an attestation about an attestation.
+
+        verify options
+          --report <file>             the envelope, as downloaded
+          --public-key <file>         the key it names, in PEM
+          --control-plane <url>       fetch that key from /api/v1/keys instead
+          --agent                     check the agent's own signature instead
+          --canonical-only            write the signed bytes to stdout and stop
 
         run options
           --control-plane <url>       the origin you signed up at
