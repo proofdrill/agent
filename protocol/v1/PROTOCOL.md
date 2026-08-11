@@ -116,6 +116,10 @@ This is the point of the asymmetric counter-signature, so it gets a worked
 recipe rather than a paragraph.
 
 ```bash
+# 0. the key this report names — every report says which one signed it
+KEY_ID=$(jq -r .receipt.counterSignature.keyId report.json)
+curl -sf "https://YOUR-CONTROL-PLANE/api/v1/keys/$KEY_ID.pem" > proofdrill-key.pem
+
 # 1. the canonical bytes that were signed
 proofdrill verify --report report.json --canonical-only > canonical.bin
 
@@ -124,13 +128,19 @@ jq -r .receipt.counterSignature.value report.json \
   | tr '_-' '/+' | base64 -d > signature.der
 
 # 3. the check, with nothing of ours involved
-openssl dgst -sha256 -verify proofdrill-public-key.pem \
+openssl dgst -sha256 -verify proofdrill-key.pem \
   -signature signature.der canonical.bin
 ```
 
-`proofdrill verify` does the same thing and reports it in words. Both are
-provided because an auditor who has to install our tool in order to check our
-attestation has been given an attestation about an attestation.
+Step 0 is why the counter-signature is asymmetric at all — §8. Step 1 is the one
+line that uses our tool, and it does not have to: the canonical form is §3's
+seven rules and any JSON library produces it, which is what an evidence pack's
+`VERIFY.md` does in four lines of Python.
+
+`proofdrill verify --report report.json --control-plane https://YOUR-CONTROL-PLANE`
+does all four steps and reports the result in words. Both are provided because an
+auditor who has to install our tool in order to check our attestation has been
+given an attestation about an attestation.
 
 ## 7. What the control plane does not trust
 
@@ -143,3 +153,56 @@ for the person reading the terminal, never an enforcement point.
 A modified agent can therefore run as many drills as it likes and none of them
 will appear in an organisation's history, which is the only artefact that is ever
 handed to an enterprise customer.
+
+## 8. The key list, and rotation
+
+```
+GET /api/v1/keys              every key the control plane has ever signed with
+GET /api/v1/keys/<id>.pem     one of them, as a PEM file
+```
+
+```json
+{
+  "keys": [
+    {
+      "keyId": "2026-q3",
+      "status": "active",
+      "algorithm": "ECDSA-P256-SHA256",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\n…\n",
+      "sha256": "9f2c…",
+      "retiredAt": null,
+      "pem": "/api/v1/keys/2026-q3.pem"
+    }
+  ]
+}
+```
+
+Anonymous, and it has to be: the reader is an auditor at another company holding
+an archive, with no account and no reason to want one.
+
+`sha256` is over the DER `SubjectPublicKeyInfo` — the number
+`openssl pkey -pubin -outform DER | openssl dgst -sha256` prints — so a key that
+travelled inside an evidence pack can be compared against one fetched from here
+without either side agreeing about line endings first.
+
+**PEM and not JWKS**, deliberately. A key set of base64url coordinates is the
+idiomatic answer and the wrong one for this reader: they run the three lines of
+`openssl` in §6, and JWKS would make them reassemble a PEM from an `x` and a `y`
+before they could start — which is the "install our tool to check our
+attestation" problem wearing a different hat.
+
+**Keys are added and never removed.** A report names the key that signed it,
+because rotation is a certainty over the life of an obligation somebody is
+proving to an auditor. A control plane that dropped a retired key would turn
+every report that key signed into a document nobody can check — silently, with
+nothing on any screen to say so. The retired ones stay, with `status: "retired"`
+and the date they stopped signing.
+
+Two consequences worth stating, because both are promises:
+
+- **An old report keeps verifying.** Whatever else changes, the key it names is
+  still served from here.
+- **The agent checks what it is told with this list too.** A job answer
+  (`JOBS.md` §3) is counter-signed with the same key, and an agent refuses to act
+  on one it cannot verify. A key id it has never seen makes it re-read this list,
+  which is exactly what a rotation looks like from inside a customer's perimeter.

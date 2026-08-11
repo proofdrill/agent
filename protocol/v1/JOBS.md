@@ -73,7 +73,11 @@ proxy retried a POST is a failure this design refuses to make possible.
 Nothing to do:
 
 ```json
-{ "protocolVersion": 1, "job": null }
+{
+  "protocolVersion": 1,
+  "job": null,
+  "signature": { "algorithm": "ECDSA-P256-SHA256", "keyId": "2026-q3", "value": "base64url" }
+}
 ```
 
 Something to do:
@@ -94,9 +98,33 @@ Something to do:
     "postgresMajor": 17,
     "rpoWindowHours": 24,
     "leaseExpiresAt": "2026-08-11T22:20:00Z"
-  }
+  },
+  "signature": { "algorithm": "ECDSA-P256-SHA256", "keyId": "2026-q3", "value": "base64url" }
 }
 ```
+
+### 3.1 The answer is counter-signed, and the body is the bytes that were signed
+
+Same key as a report's receipt, published at `/api/v1/keys` (`PROTOCOL.md` §8),
+and the same rule as everywhere else: canonicalise the document with
+`signature.value` removed, then verify. The response body **is** that canonical
+form, so nothing has to guess how the control plane spelled it before checking.
+
+**Every answer, including the empty one.** An answer that silences an agent for a
+night is as useful to a forger as one that sends it somewhere, and an agent that
+decides for itself when a signature is required has a downgrade path: strip the
+block, and it accepts.
+
+This does not replace TLS and does not pretend to — a list fetched over a broken
+connection is as forgeable as the answer it checks. What it adds is that *what a
+machine inside your perimeter was told to do* is afterwards checkable by somebody
+who was not there.
+
+**Compatibility runs one way here.** An agent built before this section ignores
+an unknown field and is unaffected; an agent built after it refuses an answer
+with no signature. That asymmetry is deliberate and it is the only one available:
+old agents are permanent, because nothing auto-updates, and old control planes
+are not — there is one, and we deploy it.
 
 **There are no credentials in a job, and there is no field for one.** It says
 where to look; the read-only key that opens it is an environment variable on the
@@ -147,7 +175,11 @@ Said plainly, because a protocol's silences are read as promises:
   agent has. A job for a major it cannot run is reported as
   `could_not_attempt` with a sentence naming it, which is visible to the customer
   — where a job filtered away silently would not be.
-- **No signature on the answer.** A forged job would need TLS to be broken; when
-  the public key list exists, the answer becomes counter-signed and this line
-  goes away.
 - **No cancellation.** A job an agent holds runs to completion or to its lease.
+- **No encryption of the answer beyond TLS.** There is nothing secret in a job —
+  no credential, and no field for one — so a signature, which says who wrote it,
+  is the property worth having and confidentiality is not.
+
+*This list used to begin "no signature on the answer", with the note that it
+would go away once there was a public key list to check one against. There is
+(`PROTOCOL.md` §8), and it has: see §3.1.*

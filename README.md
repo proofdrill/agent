@@ -112,8 +112,15 @@ receipt, and that is the evidence.** The counter-signature is asymmetric on
 purpose, so a report can be checked by somebody who trusts neither you nor us:
 
 ```
-proofdrill verify --report report.json --public-key proofdrill-public-key.pem
+proofdrill verify --report report.json --control-plane https://your-control-plane
+proofdrill verify --report report.json --public-key that-key.pem
 ```
+
+Every report names the key that signed it, and the control plane publishes every
+key it has ever signed with at `/api/v1/keys` — including the ones it has stopped
+using, because a report is evidence for as long as the obligation it is about.
+The first form fetches the right one; the second is for checking offline, with
+the key that travelled inside an evidence pack.
 
 The same check is three lines of `openssl` in §6 of the protocol, because an
 auditor who has to install our tool in order to check our attestation has been
