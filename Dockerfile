@@ -71,6 +71,12 @@ CMD ["--help"]
 # ---------------------------------------------------------------------------
 FROM agent AS verify
 USER root
+# openssl is here and NOT in the product image: it is the independent judge of
+# our signatures. Checking a signature with the code that produced it proves
+# only that the code agrees with itself.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl \
+ && rm -rf /var/lib/apt/lists/*
 COPY dev/verify.sh dev/make-fixture.sh /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/verify.sh /usr/local/bin/make-fixture.sh
 USER drill

@@ -186,6 +186,64 @@ proofdrill drill --dump-file /work/with-roles.dump --not-an-option 1
 expect "an unknown option is refused rather than ignored" 64 "$?"
 
 # ---------------------------------------------------------------------------
+say "6b. the protocol, judged by openssl and not by us"
+# ---------------------------------------------------------------------------
+export PROOFDRILL_TOKEN=rh_agt_verification_token
+proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 --envelope > /work/envelope.json
+expect "a drill produces a signed envelope" 0 "$?"
+
+proofdrill verify --report /work/envelope.json --agent >/dev/null
+expect "the agent signature verifies with its own token" 0 "$?"
+
+PROOFDRILL_TOKEN=somebody-elses proofdrill verify --report /work/envelope.json --agent >/dev/null 2>&1
+expect "and does not verify with another token" 1 "$?"
+
+# The independent half. openssl recomputes the HMAC over the same canonical
+# bytes; if our canonicalisation and openssl's idea of HMAC-SHA256 disagree by
+# one byte, these two strings differ.
+proofdrill verify --report /work/envelope.json --agent --canonical-only > /work/agent.bin
+CLAIMED="$(sed -n 's/.*"value": "\([^"]*\)".*/\1/p' /work/envelope.json | head -1)"
+COMPUTED="$(openssl dgst -sha256 -mac HMAC -macopt "key:$PROOFDRILL_TOKEN" -binary /work/agent.bin \
+            | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+if [ "$CLAIMED" = "$COMPUTED" ]; then
+  printf '  [pass] openssl computes the same agent signature over the same canonical bytes\n'
+else
+  printf '  [FAIL] openssl disagrees: ours %s, openssl %s\n' "$CLAIMED" "$COMPUTED"
+  FAILURES=$((FAILURES + 1))
+fi
+
+# And the counter-signature, with openssl standing in for the control plane —
+# which is the whole point of choosing an asymmetric algorithm. If this works,
+# §6 of the protocol is a recipe somebody can actually follow.
+openssl ecparam -name prime256v1 -genkey -noout -out /work/private.pem 2>/dev/null
+openssl ec -in /work/private.pem -pubout -out /work/public.pem 2>/dev/null
+
+sed '1s/^{/{ "receipt": { "receivedAt": "2026-08-11T09:15:00Z", "reportId": "r1", "counterSignature": { "algorithm": "ECDSA-P256-SHA256", "keyId": "test" } },/' \
+  /work/envelope.json > /work/receipted.json
+
+proofdrill verify --report /work/receipted.json --canonical-only > /work/counter.bin
+openssl dgst -sha256 -sign /work/private.pem -out /work/counter.der /work/counter.bin
+SIGNATURE="$(base64 -w0 /work/counter.der | tr '+/' '-_' | tr -d '=')"
+sed "s|\"keyId\": \"test\"|\"keyId\": \"test\", \"value\": \"$SIGNATURE\"|" \
+  /work/receipted.json > /work/attested.json
+
+proofdrill verify --report /work/attested.json --public-key /work/public.pem >/dev/null
+expect "a counter-signature made by openssl verifies with our code" 0 "$?"
+
+# The property the whole design rests on. The row count is changed to something
+# flattering; the document stays perfectly well formed and the attestation fails.
+sed 's/20000/1/' /work/attested.json > /work/tampered.json
+proofdrill verify --report /work/tampered.json --public-key /work/public.pem >/dev/null 2>&1
+expect "an edited report fails the attestation while staying well formed" 1 "$?"
+
+# A report that was never received attests to nothing, and says so rather than
+# looking like a failure.
+proofdrill verify --report /work/envelope.json --public-key /work/public.pem >/dev/null 2>&1
+expect "an envelope with no receipt cannot be checked" 2 "$?"
+
+unset PROOFDRILL_TOKEN
+
+# ---------------------------------------------------------------------------
 say "7. nothing was left behind"
 # ---------------------------------------------------------------------------
 if [ -d /work/cluster ]; then

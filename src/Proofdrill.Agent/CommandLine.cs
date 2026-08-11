@@ -17,12 +17,14 @@ internal sealed class CommandLine
     private static readonly HashSet<string> KnownFlags = new(StringComparer.Ordinal)
     {
         "--dry-run", "--json", "--help", "--s3-path-style", "--s3-virtual-host",
+        "--envelope", "--canonical-only", "--agent",
     };
 
     private static readonly HashSet<string> KnownValues = new(StringComparer.Ordinal)
     {
         "--dump-file", "--pg-major", "--rpo-window-hours", "--work-dir",
         "--s3-endpoint", "--s3-bucket", "--s3-prefix", "--s3-pattern", "--s3-region",
+        "--report-to", "--agent-id", "--report", "--public-key",
     };
 
     /// <summary>
@@ -37,6 +39,8 @@ internal sealed class CommandLine
         ["--s3-secret-access-key"] = Credentials,
         ["--access-key"] = Credentials,
         ["--secret-key"] = Credentials,
+        ["--token"] = "the registration token is read from PROOFDRILL_TOKEN and never from the command line, for " +
+                      "the same reason: a command line is readable by every process on the machine.",
     };
 
     private const string Credentials =

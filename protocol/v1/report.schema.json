@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proofdrill.com/protocol/v1/report.schema.json",
+  "title": "Proofdrill drill report envelope, version 1",
+  "description": "Everything that leaves a customer's perimeter. `additionalProperties` is false at every level on purpose: a reader who has checked this file has checked the whole document, and no future field can carry content past them without a version change.",
+  "type": "object",
+  "required": ["protocolVersion", "agent", "report", "agentSignature"],
+  "additionalProperties": false,
+  "properties": {
+    "protocolVersion": { "const": 1 },
+    "agent": {
+      "type": "object",
+      "required": ["id", "version", "hostname"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "version": { "type": "string", "maxLength": 64 },
+        "hostname": { "type": "string", "maxLength": 255 }
+      }
+    },
+    "report": {
+      "type": "object",
+      "required": [
+        "outcome", "startedAt", "postgresMajor", "artefact",
+        "measuredRpoSeconds", "measuredRtoMilliseconds",
+        "checks", "rowCounts", "observations", "notAttempted"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "description": "could_not_attempt is not a softer failure. It means nothing was learned about the backup, so it moves the clock in neither direction.",
+          "enum": ["passed", "failed", "could_not_attempt"]
+        },
+        "startedAt": { "$ref": "#/$defs/timestamp" },
+        "postgresMajor": { "type": ["integer", "null"], "minimum": 9, "maximum": 99 },
+        "artefact": {
+          "type": "object",
+          "required": ["fileName", "sizeBytes", "lastModified", "dumpedFromMajor"],
+          "additionalProperties": false,
+          "properties": {
+            "fileName": { "type": "string", "maxLength": 512 },
+            "sizeBytes": { "type": "integer", "minimum": 0 },
+            "lastModified": { "$ref": "#/$defs/timestamp" },
+            "dumpedFromMajor": { "type": ["integer", "null"], "minimum": 9, "maximum": 99 }
+          }
+        },
+        "measuredRpoSeconds": {
+          "description": "The age of the artefact. An integer of seconds, never a fraction of an hour: a canonical form has no portable spelling for 0.1.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "measuredRtoMilliseconds": {
+          "description": "The real duration of the restore. Null when nothing was restored.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["level", "key", "outcome", "detail"],
+            "additionalProperties": false,
+            "properties": {
+              "level": { "type": "integer", "enum": [1, 2, 3, 4] },
+              "key": { "type": "string", "pattern": "^[a-z0-9_]{1,64}$" },
+              "outcome": { "enum": ["passed", "failed", "could_not_attempt"] },
+              "detail": { "type": "string", "maxLength": 2048 }
+            }
+          }
+        },
+        "rowCounts": {
+          "description": "Table names and row counts. A report that cannot say which table lost rows is not a report.",
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 },
+          "propertyNames": { "maxLength": 512 }
+        },
+        "observations": { "$ref": "#/$defs/sentences" },
+        "notAttempted": {
+          "description": "What this run did NOT check. Always present, never folded away: what is missing from a report is what a reader assumes was checked and passed.",
+          "$ref": "#/$defs/sentences"
+        }
+      }
+    },
+    "agentSignature": {
+      "description": "Proof of origin, and NOT the evidence: the key is the customer's own registration token, so they can re-sign anything they edit.",
+      "type": "object",
+      "required": ["algorithm", "keyId", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "const": "HMAC-SHA256" },
+        "keyId": { "type": "string", "maxLength": 64 },
+        "value": { "$ref": "#/$defs/base64url" }
+      }
+    },
+    "receipt": {
+      "description": "Added by the control plane on receipt and never by the agent. This is the evidence.",
+      "type": "object",
+      "required": ["receivedAt", "reportId", "counterSignature"],
+      "additionalProperties": false,
+      "properties": {
+        "receivedAt": { "$ref": "#/$defs/timestamp" },
+        "reportId": { "type": "string", "maxLength": 64 },
+        "counterSignature": {
+          "type": "object",
+          "required": ["algorithm", "keyId", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "algorithm": { "const": "ECDSA-P256-SHA256" },
+            "keyId": {
+              "description": "Which key signed, so rotating one does not invalidate the history signed by its predecessor.",
+              "type": "string",
+              "maxLength": 64
+            },
+            "value": { "$ref": "#/$defs/base64url" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "description": "RFC 3339, UTC, to the second. One spelling everywhere.",
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "base64url": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$", "maxLength": 256 },
+    "sentences": { "type": "array", "items": { "type": "string", "maxLength": 2048 } }
+  }
+}

@@ -86,9 +86,38 @@ attempted and the backup did not hold, **2** could not be attempted — which is
 correction and not a verdict — **64** a bad command line, **70** the agent itself
 broke, which says nothing about your backup.
 
-When there is a release this becomes one `docker run` of a published image, with
-your storage credentials as environment variables and a `doctor` subcommand that
-checks the configuration without restoring anything.
+Against your own bucket, downloading nothing:
+
+```
+docker run --rm --cap-drop=ALL \
+  -e PROOFDRILL_S3_ACCESS_KEY_ID=... -e PROOFDRILL_S3_SECRET_ACCESS_KEY=... \
+  proofdrill-agent doctor \
+  --s3-endpoint https://s3.eu-central-1.amazonaws.com \
+  --s3-bucket my-backups --s3-prefix nightly/ --s3-pattern 'db-*.dump'
+```
+
+`drill` takes the same storage options and fetches the newest matching artefact
+itself. Credentials are read from the environment and are never accepted as
+arguments: a command line is readable by every process on the machine.
+
+When there is a release this becomes one `docker run` of a published image.
+
+## The report, and the two signatures on it
+
+What leaves your perimeter is defined in [`protocol/v1`](protocol/v1/PROTOCOL.md)
+— the wire format, the canonical bytes, the signatures, and a worked example.
+
+The agent signs to authenticate; **the control plane counter-signs and dates on
+receipt, and that is the evidence.** The counter-signature is asymmetric on
+purpose, so a report can be checked by somebody who trusts neither you nor us:
+
+```
+proofdrill verify --report report.json --public-key proofdrill-public-key.pem
+```
+
+The same check is three lines of `openssl` in §6 of the protocol, because an
+auditor who has to install our tool in order to check our attestation has been
+given an attestation about an attestation.
 
 ## Licence
 

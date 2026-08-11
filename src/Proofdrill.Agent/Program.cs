@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Proofdrill.Agent;
+using Proofdrill.Agent.Protocol;
 using Proofdrill.Agent.Storage;
 
 // Exit codes are a contract, because people put this in cron and read $?:
@@ -51,6 +52,9 @@ try
 
         case "doctor":
             return await DoctorAsync(command, stopping.Token).ConfigureAwait(false);
+
+        case "verify":
+            return Verify(command);
 
         // Named rather than hidden. Somebody reading the README will type this,
         // and "unknown subcommand" would suggest they are misremembering rather
@@ -109,6 +113,85 @@ catch (Exception exception)
         .ConfigureAwait(false);
     await Console.Error.WriteLineAsync(exception.ToString()).ConfigureAwait(false);
     return InternalError;
+}
+
+// The command an auditor runs, and the reason the counter-signature is
+// asymmetric. It checks OUR attestation, so it takes a public key and needs
+// nothing else of ours — §6 of the protocol prints the same check as three
+// lines of openssl, on purpose.
+int Verify(CommandLine command)
+{
+    var envelope = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(command.Required("--report")))
+        as System.Text.Json.Nodes.JsonObject
+        ?? throw new UsageException("that file does not contain a report envelope");
+
+    // --agent selects the other signature. Both are exposed because both have a
+    // reader: the counter-signature is checked by whoever was handed the report,
+    // and the agent signature is checked by whoever is debugging why the control
+    // plane refused one.
+    var forAgent = command.Has("--agent");
+    var canonical = forAgent
+        ? ReportEnvelope.AgentSignedBytes(envelope)
+        : ReportEnvelope.CounterSignedBytes(envelope);
+
+    if (command.Has("--canonical-only"))
+    {
+        using var stdout = Console.OpenStandardOutput();
+        stdout.Write(canonical);
+        return Passed;
+    }
+
+    if (forAgent)
+    {
+        var claimed = envelope["agentSignature"]?["value"]?.GetValue<string>()
+            ?? throw new UsageException("that report carries no agent signature");
+
+        if (!Signatures.VerifyAgent(canonical, ReportEnvelope.Token(), claimed))
+        {
+            Console.Error.WriteLine("proofdrill: the agent signature does not verify against this token.");
+            return Failed;
+        }
+
+        Console.WriteLine("  VERIFIED   the agent signature matches this token");
+        return Passed;
+    }
+
+    var signature = envelope["receipt"]?["counterSignature"]?["value"]?.GetValue<string>();
+    if (signature is null)
+    {
+        Console.Error.WriteLine(
+            "proofdrill: this report has no counter-signature. It was produced by an agent and never received by " +
+            "a control plane, so it attests to nothing beyond the machine that made it.");
+        return CouldNotAttempt;
+    }
+
+    if (command.Value("--public-key") is not { } keyPath)
+    {
+        Console.Error.WriteLine(
+            "proofdrill: pass --public-key to check the counter-signature. Without it this command can only say " +
+            "that a signature is present, which is not a check.");
+        return CouldNotAttempt;
+    }
+
+    using var key = System.Security.Cryptography.ECDsa.Create();
+    key.ImportFromPem(File.ReadAllText(keyPath));
+
+    if (!Signatures.VerifyCounterSignature(canonical, key, signature))
+    {
+        Console.Error.WriteLine(
+            "proofdrill: THE COUNTER-SIGNATURE DOES NOT VERIFY. This report was altered after it was received, or " +
+            "it was not signed by the key you supplied.");
+        return Failed;
+    }
+
+    var receivedAt = envelope["receipt"]?["receivedAt"]?.GetValue<string>() ?? "an unstated time";
+    var outcome = envelope["report"]?["outcome"]?.GetValue<string>() ?? "unknown";
+    Console.WriteLine();
+    Console.WriteLine($"  VERIFIED   received {receivedAt}, and unchanged since");
+    Console.WriteLine($"  outcome    {outcome}");
+    Console.WriteLine($"  agent      {envelope["agent"]?["id"]} version {envelope["agent"]?["version"]}");
+    Console.WriteLine();
+    return Passed;
 }
 
 async Task<int> DoctorAsync(CommandLine command, CancellationToken cancellationToken)
@@ -213,7 +296,24 @@ async Task<int> DrillAsync(CommandLine command, CancellationToken cancellationTo
 
     var report = await DrillRunner.RunAsync(options, cancellationToken).ConfigureAwait(false);
 
-    if (command.Has("--json"))
+    if (command.Has("--envelope") || command.Value("--report-to") is not null)
+    {
+        var envelope = ReportEnvelope.Sign(
+            ReportEnvelope.Build(report, Identity(command)),
+            AgentId(command),
+            ReportEnvelope.Token());
+
+        if (command.Has("--envelope"))
+        {
+            Console.WriteLine(envelope.ToJsonString(ReportJson.Format));
+        }
+
+        if (command.Value("--report-to") is { } endpoint)
+        {
+            await PostAsync(envelope, endpoint, cancellationToken).ConfigureAwait(false);
+        }
+    }
+    else if (command.Has("--json"))
     {
         Console.WriteLine(report.ToJson());
     }
@@ -292,6 +392,37 @@ void Print(DrillReport report)
     }
 
     Console.WriteLine();
+}
+
+static AgentIdentity Identity(CommandLine command) =>
+    new(AgentId(command), DrillRunner.AgentVersion(), Environment.MachineName);
+
+// Provisional until registration exists: the control plane will assign this at
+// enrolment, and the token will be bound to it. Written down as provisional so
+// nobody builds on it by mistake.
+static string AgentId(CommandLine command) =>
+    command.Value("--agent-id")
+    ?? Environment.GetEnvironmentVariable("PROOFDRILL_AGENT_ID")
+    ?? Environment.MachineName;
+
+async Task PostAsync(System.Text.Json.Nodes.JsonObject envelope, string endpoint, CancellationToken cancellationToken)
+{
+    using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
+    using var body = new StringContent(envelope.ToJsonString(), System.Text.Encoding.UTF8, "application/json");
+    using var response = await http.PostAsync(new Uri(endpoint), body, cancellationToken).ConfigureAwait(false);
+
+    var answer = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+    if (!response.IsSuccessStatusCode)
+    {
+        // Never silently: a drill whose report did not arrive is a drill that did
+        // not happen as far as anybody reading the history is concerned, and the
+        // clock must not move for it.
+        throw new DrillCannotBeAttemptedException(
+            $"the report was not accepted by {endpoint}: HTTP {(int)response.StatusCode}. {answer.Trim()}");
+    }
+
+    Console.WriteLine(answer);
 }
 
 static string Mark(string outcome) => outcome switch
