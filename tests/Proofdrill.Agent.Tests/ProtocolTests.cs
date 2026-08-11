@@ -230,3 +230,60 @@ public class SignatureTests
         return envelope;
     }
 }
+
+/// <summary>
+/// The claim, which is a request rather than a document — <c>protocol/v1/JOBS.md</c>.
+/// </summary>
+public class ClaimTests
+{
+    private const string Token = "rh_agt_0123456789abcdef";
+    private const string AgentId = "0199a4c2-1111-7000-8000-000000000001";
+
+    private static JsonObject Claim() => ClaimEnvelope.Build(
+        new AgentIdentity(AgentId, "1.2.3", "backup-host"),
+        new DateTimeOffset(2026, 8, 11, 16, 20, 0, TimeSpan.Zero));
+
+    /// <summary>
+    /// The same canonical form as a report, and the same rule about what a
+    /// signature covers: everything above it, and never itself.
+    /// </summary>
+    [Fact]
+    public void The_signature_covers_the_request_and_not_itself()
+    {
+        var claim = Claim();
+        var before = ClaimEnvelope.SignedBytes(claim);
+
+        ClaimEnvelope.Sign(claim, AgentId, Token);
+
+        Assert.Equal(before, ClaimEnvelope.SignedBytes(claim));
+        Assert.True(Signatures.VerifyAgent(
+            before, Token, claim["agentSignature"]!["value"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public void A_claim_signed_with_another_token_does_not_verify()
+    {
+        var claim = ClaimEnvelope.Sign(Claim(), AgentId, "another-token");
+
+        Assert.False(Signatures.VerifyAgent(
+            ClaimEnvelope.SignedBytes(claim), Token, claim["agentSignature"]!["value"]!.GetValue<string>()));
+    }
+
+    /// <summary>
+    /// A request carries the moment it was made, because a signed request — unlike
+    /// a signed document — can be replayed. The control plane refuses one more
+    /// than five minutes from its own clock, which only works if this is one
+    /// spelling everywhere.
+    /// </summary>
+    [Fact]
+    public void The_moment_it_was_made_is_RFC_3339_in_UTC_to_the_second()
+    {
+        var canonical = Encoding.UTF8.GetString(ClaimEnvelope.SignedBytes(Claim()));
+
+        Assert.Contains("\"requestedAt\":\"2026-08-11T16:20:00Z\"", canonical, StringComparison.Ordinal);
+
+        // And it is inside the signature: a timestamp an attacker could edit
+        // would make the window it exists for meaningless.
+        Assert.Contains("\"claim\":{", canonical, StringComparison.Ordinal);
+    }
+}
