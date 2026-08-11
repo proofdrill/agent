@@ -71,7 +71,7 @@ CMD ["--help"]
 # ---------------------------------------------------------------------------
 FROM agent AS verify
 USER root
-COPY dev/verify.sh /usr/local/bin/verify.sh
-RUN chmod 0755 /usr/local/bin/verify.sh
+COPY dev/verify.sh dev/make-fixture.sh /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/verify.sh /usr/local/bin/make-fixture.sh
 USER drill
 ENTRYPOINT ["/usr/local/bin/verify.sh"]

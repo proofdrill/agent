@@ -16,13 +16,33 @@ internal sealed class CommandLine
 {
     private static readonly HashSet<string> KnownFlags = new(StringComparer.Ordinal)
     {
-        "--dry-run", "--json", "--help",
+        "--dry-run", "--json", "--help", "--s3-path-style", "--s3-virtual-host",
     };
 
     private static readonly HashSet<string> KnownValues = new(StringComparer.Ordinal)
     {
         "--dump-file", "--pg-major", "--rpo-window-hours", "--work-dir",
+        "--s3-endpoint", "--s3-bucket", "--s3-prefix", "--s3-pattern", "--s3-region",
     };
+
+    /// <summary>
+    /// Options that exist only to be refused, with a reason. "Unknown option" is
+    /// a true answer here and a useless one: somebody who tried to pass a secret
+    /// key on the command line will try the next spelling rather than learn why
+    /// none of them work.
+    /// </summary>
+    private static readonly Dictionary<string, string> Refused = new(StringComparer.Ordinal)
+    {
+        ["--s3-access-key-id"] = Credentials,
+        ["--s3-secret-access-key"] = Credentials,
+        ["--access-key"] = Credentials,
+        ["--secret-key"] = Credentials,
+    };
+
+    private const string Credentials =
+        "storage credentials are never taken from the command line, because a command line is readable by every " +
+        "process on the machine and it lands in shell history. Set PROOFDRILL_S3_ACCESS_KEY_ID and " +
+        "PROOFDRILL_S3_SECRET_ACCESS_KEY in the environment instead.";
 
     private CommandLine(string command, Dictionary<string, string> values, HashSet<string> flags)
     {
@@ -91,6 +111,11 @@ internal sealed class CommandLine
         for (var index = 1; index < arguments.Count; index++)
         {
             var argument = arguments[index];
+
+            if (Refused.TryGetValue(argument, out var reason))
+            {
+                throw new UsageException(reason);
+            }
 
             if (KnownFlags.Contains(argument))
             {

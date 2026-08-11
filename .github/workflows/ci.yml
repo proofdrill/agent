@@ -58,3 +58,10 @@ jobs:
             --security-opt=no-new-privileges \
             --memory=1g \
             proofdrill-agent:verify
+
+      # Against MinIO, and that is the point: a signer has to be judged by an
+      # implementation that is not ours. A test server we wrote would agree with
+      # our own mistakes, which is the same reason the control plane computes
+      # TOTP and Stripe's HMAC independently in its tests.
+      - name: Fetch from real storage and drill
+        run: bash dev/verify-s3.sh

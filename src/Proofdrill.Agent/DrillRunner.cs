@@ -362,9 +362,6 @@ internal static partial class DrillRunner
             }
         }
 
-        notAttempted.Add(
-            "level 3, role attributes: whether any role holds BYPASSRLS cannot be read from a per-database artefact, " +
-            "because role attributes live in the cluster globals.");
         notAttempted.Add("level 3, customer SQL assertions: not implemented yet");
         notAttempted.Add("level 2 entirely: extensions, sequences, constraints, foreign keys, functions and triggers");
 

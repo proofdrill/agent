@@ -53,12 +53,16 @@ internal sealed record DrillReport(
     /// </summary>
     public const int CurrentVersion = 1;
 
-    private static readonly JsonSerializerOptions Format = new()
+    public string ToJson() => JsonSerializer.Serialize(this, ReportJson.Format);
+}
+
+/// <summary>One shape for everything this agent prints as JSON.</summary>
+internal static class ReportJson
+{
+    public static readonly JsonSerializerOptions Format = new()
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.Never,
     };
-
-    public string ToJson() => JsonSerializer.Serialize(this, Format);
 }
