@@ -189,7 +189,12 @@ internal static partial class ArtefactInspector
         roles.Add(name);
     }
 
-    [GeneratedRegex(@"^\s*(?:GRANT|REVOKE)\b[^;]*?\b(?:TO|FROM)\s+(?<roles>[^;]+);",
+    // The trailing WITH clause is not part of the role list. Without excluding it
+    // the whole tail — `app_role WITH GRANT OPTION` — is read as one name, the
+    // identifier filter throws it away for containing spaces, and the role is
+    // never created. Found by a unit test, on a form of GRANT that is completely
+    // ordinary.
+    [GeneratedRegex(@"^\s*(?:GRANT|REVOKE)\b[^;]*?\b(?:TO|FROM)\s+(?<roles>[^;]+?)(?:\s+WITH\s+[^;]*)?\s*;",
         RegexOptions.Multiline | RegexOptions.IgnoreCase)]
     private static partial Regex GrantOrRevoke();
 

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Proofdrill.Agent.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <!-- The agent project itself has no third party packages and that stays true.
+       A test project is not the artefact anybody runs inside their perimeter, so
+       the same rule does not apply to it. Versions match the control plane's
+       suites: xUnit v2, deliberately, because v3 is a different runner and one
+       stack across two repositories is one thing to know. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Proofdrill.Agent\Proofdrill.Agent.csproj" />
+  </ItemGroup>
+
+</Project>

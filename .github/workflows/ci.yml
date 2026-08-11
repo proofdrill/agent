@@ -1,0 +1,60 @@
+name: CI
+
+# Two jobs, and the second is the one that matters. The unit suite pins the
+# parsers; the drill job builds the real image and runs a real restore inside it
+# on a machine that is not the author's. The control plane learned that
+# distinction the expensive way: every command in its CI had been run by hand
+# here first, and what the first red run caught was not a command, it was where
+# the runner stood.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # Locked mode, so a transitive version can never drift between the build
+      # that was tested and the build that ships.
+      - name: Restore
+        run: dotnet restore Proofdrill.Agent.slnx --locked-mode
+
+      - name: Build
+        run: dotnet build Proofdrill.Agent.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test Proofdrill.Agent.slnx --configuration Release --no-build
+
+  drill:
+    name: A real restore, in the real image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build --target verify --tag proofdrill-agent:verify .
+
+      # The flags are the claim, not decoration: no Docker socket, no privileged
+      # mode, every capability dropped. If the agent ever needs one of these
+      # removed to work, that is a product change and this job is where it stops.
+      - name: Drill
+        run: |
+          docker run --rm \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --memory=1g \
+            proofdrill-agent:verify

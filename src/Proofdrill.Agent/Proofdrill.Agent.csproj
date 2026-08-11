@@ -17,4 +17,11 @@
          written without it. -->
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Everything here is internal, and it stays internal: this is an
+         application, not a library, and a public surface would be an API we
+         never meant to promise. -->
+    <InternalsVisibleTo Include="Proofdrill.Agent.Tests" />
+  </ItemGroup>
+
 </Project>

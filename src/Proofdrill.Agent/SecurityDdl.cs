@@ -110,10 +110,16 @@ internal static partial class SecurityDdl
     [GeneratedRegex(@"\s+")]
     private static partial Regex Whitespace();
 
-    [GeneratedRegex(@"\bTO\s+(?<roles>.*?)(?=\s+USING\b|\s+WITH\s+CHECK\b|\s+WITH\s+GRANT\s+OPTION\b|$)",
+    // A role list contains no brackets and no string literals, and saying so is
+    // what keeps these patterns out of a policy's USING expression — where the
+    // word TO can appear inside a quoted value and rewriting it would corrupt the
+    // very text being compared. A column level grant, `GRANT SELECT (a, b) ON`,
+    // is excluded by the same rule and simply goes uncanonicalised, which can
+    // only ever cost a false difference and never hide a real one.
+    [GeneratedRegex(@"\bTO\s+(?<roles>[^()']*?)(?=\s+USING\b|\s+WITH\s+CHECK\b|\s+WITH\s+GRANT\s+OPTION\b|$)",
         RegexOptions.IgnoreCase)]
     private static partial Regex ToClause();
 
-    [GeneratedRegex(@"^(?<verb>GRANT|REVOKE)\s+(?<privileges>.*?)\s+ON\s", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^(?<verb>GRANT|REVOKE)\s+(?<privileges>[^()']*?)\s+ON\s", RegexOptions.IgnoreCase)]
     private static partial Regex PrivilegeList();
 }

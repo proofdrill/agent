@@ -3,4 +3,8 @@
   <Folder Name="/src/Agent/">
     <Project Path="src/Proofdrill.Agent/Proofdrill.Agent.csproj" />
   </Folder>
+  <Folder Name="/tests/" />
+  <Folder Name="/tests/Unit/">
+    <Project Path="tests/Proofdrill.Agent.Tests/Proofdrill.Agent.Tests.csproj" />
+  </Folder>
 </Solution>
