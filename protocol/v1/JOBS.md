@@ -97,7 +97,18 @@ Something to do:
     },
     "postgresMajor": 17,
     "rpoWindowHours": 24,
-    "leaseExpiresAt": "2026-08-11T22:20:00Z"
+    "leaseExpiresAt": "2026-08-11T22:20:00Z",
+    "assertions": {
+      "assertions": [
+        {
+          "key": "app_role_sees_no_other_tenant",
+          "title": "the application role cannot read another tenant's rows",
+          "sql": "SELECT count(*) = 0 FROM public.orders",
+          "as": "app_role",
+          "settings": { "app.tenant_id": "00000000-0000-0000-0000-000000000000" }
+        }
+      ]
+    }
   },
   "signature": { "algorithm": "ECDSA-P256-SHA256", "keyId": "2026-q3", "value": "base64url" }
 }
@@ -135,6 +146,33 @@ into.
 `leaseExpiresAt` is when the control plane will assume the agent is gone and
 offer the work again. It is renewed on every claim while a job is held, so an
 agent still restoring a hundred gigabytes keeps it by continuing to poll.
+
+### 3.2 `assertions`, the one field that is executed
+
+Every other field in a job is data the agent acts on. This one is **text the
+agent runs** inside your perimeter, so it gets its own paragraph rather than a
+row in a table. Its format, its bounds and — most of the document — what it runs
+as are in [`ASSERTIONS.md`](ASSERTIONS.md). Four things belong here, because they
+are properties of *this* protocol:
+
+- **It is covered by the counter-signature.** §3.1 applies to the whole answer,
+  so a statement altered between the control plane and the agent breaks the
+  signature and the job is refused rather than run. That is not a detail; it is
+  the reason this field can exist at all.
+- **A pack that does not parse refuses the whole job.** Drilling the target and
+  dropping the unreadable half would produce a green report for a database whose
+  owner believes their own assertions ran.
+- **The agent can refuse it.** `--no-remote-assertions` runs none of them, and
+  `--assertions <file>` replaces them with a pack from the machine itself. Both
+  are stated in the report: an agent that silently swapped or skipped a pack
+  would let a green history stand for a check that never happened.
+- **An old agent ignores it**, like any unknown field — and says so, because
+  every report lists what it did not check. A control plane that sends
+  assertions to an agent too old to run them gets a report whose *not checked*
+  section names them; nothing has to be inferred from a version number.
+
+The field is absent when a target has no assertions, which is the normal case for
+a target somebody set up five minutes ago.
 
 ## 4. Reporting against a job
 

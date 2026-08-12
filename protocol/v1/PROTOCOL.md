@@ -22,6 +22,12 @@ table lost rows is not a report. If that is more than your policy allows, the
 agent is doing something you can read the source of, and this is the paragraph
 to take to whoever sets the policy.
 
+Your own assertions ([`ASSERTIONS.md`](ASSERTIONS.md)) appear as checks named
+`assertion_<key>` at level 3, carrying the title you wrote and the verdict.
+**Not the SQL, not a setting's value, and never the database's error message** —
+an error can quote the row that caused it, so an assertion that fails to run is
+reported with its SQLSTATE and the message stays on the machine that ran it.
+
 ## 2. Two signatures, and they do different jobs
 
 | | Who | What it proves | Who can check it |

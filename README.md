@@ -2,12 +2,13 @@
 
 > **Status: early development. There is no release and no published image.**
 > `proofdrill drill` restores a `pg_dump -Fc` archive into a throwaway
-> PostgreSQL and runs the **level 1, 2 and 3** assertions against it, with
-> measured RPO and RTO. It fetches from S3-compatible storage, and
-> `proofdrill run` takes work from a control plane and reports back, signed.
-> What is still missing — your own SQL assertions, and the role attributes that
-> need a `pg_dumpall --globals-only` artefact — is printed by every run under
-> what it did not check, rather than left to be assumed.
+> PostgreSQL and runs the **level 1, 2 and 3** assertions against it —
+> **including your own SQL assertions** ([how to write
+> them](protocol/v1/ASSERTIONS.md)) — with measured RPO and RTO. It fetches from
+> S3-compatible storage, and `proofdrill run` takes work from a control plane and
+> reports back, signed. What is still missing — the role attributes that need a
+> `pg_dumpall --globals-only` artefact — is printed by every run under what it
+> did not check, rather than left to be assumed.
 
 Proofdrill proves that a database backup restores — and that the restored
 database still enforces the guarantees the original enforced.

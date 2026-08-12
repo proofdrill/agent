@@ -3,32 +3,32 @@
   "agent": {
     "id": "agt_example",
     "version": "0.0.0.0",
-    "hostname": "125ec726283e"
+    "hostname": "ef27833a4328"
   },
   "report": {
     "outcome": "passed",
-    "startedAt": "2026-08-12T12:50:24Z",
+    "startedAt": "2026-08-12T14:16:43Z",
     "postgresMajor": 17,
     "artefact": {
       "fileName": "db.dump",
-      "sizeBytes": 519745,
-      "lastModified": "2026-08-12T12:50:24Z",
+      "sizeBytes": 519628,
+      "lastModified": "2026-08-12T14:11:04Z",
       "dumpedFromMajor": 17
     },
-    "measuredRpoSeconds": 0,
-    "measuredRtoMilliseconds": 108,
+    "measuredRpoSeconds": 324,
+    "measuredRtoMilliseconds": 152,
     "checks": [
       {
         "level": 1,
         "key": "artefact_present",
         "outcome": "passed",
-        "detail": "db.dump, 507.6 KiB, written 0.0 h ago"
+        "detail": "db.dump, 507.4 KiB, written 0.1 h ago"
       },
       {
         "level": 1,
         "key": "artefact_within_rpo_window",
         "outcome": "passed",
-        "detail": "0.0 h old, window is 24.0 h"
+        "detail": "0.1 h old, window is 24.0 h"
       },
       {
         "level": 1,
@@ -101,6 +101,18 @@
         "key": "row_level_security_actually_restricts",
         "outcome": "passed",
         "detail": "with no tenant context set, the owner sees fewer rows than the whole table on all 1 forced table(s): public.tenant_rows: 0 of 20000 rows visible to source"
+      },
+      {
+        "level": 3,
+        "key": "assertion_app_role_sees_no_other_tenant",
+        "outcome": "passed",
+        "detail": "the application role cannot read another tenant's rows — held (as app_role, with app.tenant_id set)"
+      },
+      {
+        "level": 3,
+        "key": "assertion_the_table_is_not_empty",
+        "outcome": "passed",
+        "detail": "the tenant table came back with rows in it — held"
       }
     ],
     "rowCounts": {
@@ -110,19 +122,19 @@
       "the artefact declares 1 table(s), 1 policy(ies), 2 row level security statement(s) and 1 grant(s)",
       "the artefact references role(s): app_role, source",
       "the artefact does not carry the cluster globals, so 2 role(s) were created empty to let the restore complete: app_role, source",
-      "the artefact declares no extensions, foreign keys, functions or triggers, so those comparisons had nothing to compare"
+      "the artefact declares no extensions, foreign keys, functions or triggers, so those comparisons had nothing to compare",
+      "2 customer assertion(s) were evaluated, from a file on this machine (pack.json), as the proofdrill_assert role: no superuser, no ability to run a program or read a file, and a read only transaction"
     ],
     "notAttempted": [
       "row_counts_within_tolerance: a tolerance needs a previous drill to compare against. The 1 count(s) in this report are what the next one will be measured against.",
       "level 3, role attributes: roles are cluster-wide and a per-database pg_dump does not contain them, so whether any role holds BYPASSRLS cannot be tested. Add the pg_dumpall --globals-only artefact to this target and it becomes testable. This is a correction, not a verdict.",
-      "level 3, application role isolation: the placeholder roles have no memberships or attributes, so what the real application role could read cannot be established from this artefact alone.",
-      "level 2, collation: a pg_dump taken without --create does not record the database's collation, so the restored copy is built with the C collation. Text ordering, and every index over a text column, follows C rules here whatever the original used — this drill neither checks that they match nor claims they do.",
-      "level 3, customer SQL assertions: not implemented yet"
+      "level 3, application role isolation: the placeholder roles have no memberships or attributes, so what the real application role could read cannot be established from this artefact alone. An assertion below names a role, and it ran against one of those placeholders: it shows what the restored database's policies do to a role of that name, not what that role holds in production.",
+      "level 2, collation: a pg_dump taken without --create does not record the database's collation, so the restored copy is built with the C collation. Text ordering, and every index over a text column, follows C rules here whatever the original used — this drill neither checks that they match nor claims they do."
     ]
   },
   "agentSignature": {
     "algorithm": "HMAC-SHA256",
     "keyId": "agt_example",
-    "value": "Iupb774Zb1dta_Z-sB6ggHG3ZwB4XQxetp6MB5CP_yM"
+    "value": "LOohxFYR7Ad4-G5Q3q6BlMHfw0zKA3NJXVe_fTF8HSE"
   }
 }

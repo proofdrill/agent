@@ -1,0 +1,21 @@
+{
+  "assertions": [
+    {
+      "key": "tenant_isolation_holds_for_a_stranger",
+      "title": "with an unknown tenant, the application role sees no rows at all",
+      "sql": "SELECT count(*) = 0 FROM public.tenant_rows",
+      "as": "app_role",
+      "settings": { "app.tenant_id": "00000000-0000-0000-0000-000000000000" }
+    },
+    {
+      "key": "the_table_is_never_empty_in_a_real_backup",
+      "title": "the customers table came back with rows in it",
+      "sql": "SELECT count(*) > 0 FROM public.customers"
+    },
+    {
+      "key": "every_row_still_belongs_to_a_customer",
+      "title": "no row lost the customer it pointed at",
+      "sql": "SELECT count(*) = 0 FROM public.tenant_rows r LEFT JOIN public.customers c ON c.id = r.customer_id WHERE r.customer_id IS NOT NULL AND c.id IS NULL"
+    }
+  ]
+}
