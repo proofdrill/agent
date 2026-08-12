@@ -21,6 +21,15 @@
 #   stale-sequence.dump    every row present and the sequence put
 #                          back to the beginning                  -> FAILS
 #
+# and three cluster globals artefacts, because roles are cluster-wide and none of
+# the five above contains one:
+#
+#   globals.sql            the roles as they are, one of them legitimately
+#                          holding BYPASSRLS                      -> PASSES
+#   globals-exempt.sql     the same cluster one ALTER later, with
+#                          BYPASSRLS on the role a policy names   -> FAILS
+#   globals-early.sql      dumped before one of the roles existed -> FAILS
+#
 # The last two are the failures nothing else sees. An archive that is well
 # formed, restores with exit code 0 and carries nothing is the product's
 # founding failure; a sequence behind its own data restores just as cleanly and
@@ -72,6 +81,30 @@ pg_ctl -D "$SRC_DATA" -o "-k $SRC_SOCK -h ''" -w -l /work/source.log start >/dev
 export PGHOST="$SRC_SOCK" PGUSER=source
 
 psql -q -v ON_ERROR_STOP=1 -d postgres -c 'CREATE ROLE app_role NOLOGIN'
+
+# The legitimate BYPASSRLS role, and it is here as a NEGATIVE control. Whoever
+# takes the backup has to be exempt from row level security or the dump comes
+# back empty — the founding failure — so a check that fired on any role holding
+# BYPASSRLS would cry wolf on every correctly configured cluster in the world.
+# No policy names this one, and level 3 must stay quiet about it.
+psql -q -v ON_ERROR_STOP=1 -d postgres -c \
+  "CREATE ROLE backup_role LOGIN BYPASSRLS PASSWORD 'not-a-real-password'"
+psql -q -v ON_ERROR_STOP=1 -d postgres -c 'GRANT pg_read_all_data TO app_role'
+# Applied to nothing: membership of the machine-access roles is refused by name,
+# because an assertion can name a role in its `as` and ASSERTIONS.md §3 promises
+# a statement cannot read a file on the host.
+psql -q -v ON_ERROR_STOP=1 -d postgres -c 'GRANT pg_read_server_files TO backup_role'
+# Two statements a globals artefact routinely carries and this agent never runs.
+psql -q -v ON_ERROR_STOP=1 -d postgres -c 'ALTER ROLE app_role SET search_path TO public'
+mkdir -p /work/ts
+psql -q -v ON_ERROR_STOP=1 -d postgres -c "CREATE TABLESPACE spare LOCATION '/work/ts'"
+
+# The globals as they stood BEFORE the reporting role existed. Written to a file
+# on purpose: it is a globals artefact older than the backup beside it, which is
+# what a nightly job that dumps the roles weekly produces, and the drill has to
+# notice that the two artefacts no longer describe the same cluster.
+pg_dumpall --globals-only > /work/globals-early.sql
+
 # A quoted name with a space in it, because they exist and because a policy that
 # names a role which cannot be recreated does not restore — leaving a table with
 # row level security enabled and no policy on it.
@@ -142,6 +175,20 @@ psql -q -v ON_ERROR_STOP=1 -d with_roles -c 'GRANT SELECT, INSERT ON tenant_rows
 psql -q -v ON_ERROR_STOP=1 -d stale_sequence \
   -c "SELECT setval('tenant_rows_id_seq', 1, false)" >/dev/null
 
+# The cluster globals, dumped WITHOUT --no-role-passwords on purpose: the file
+# therefore carries a SCRAM verifier, and a later check asserts that no part of
+# it reaches the report. GLOBALS.md recommends --no-role-passwords to customers
+# for the opposite reason — a file with no secret in it needs no protecting.
+pg_dumpall --globals-only > /work/globals.sql
+
+# And the same cluster one ALTER later. This is not contrived: granting BYPASSRLS
+# to the application role is what somebody does at four in the afternoon to make
+# a permissions problem go away, and it silently ends every policy written about
+# that role. The backup does not change; the artefact beside it does.
+psql -q -v ON_ERROR_STOP=1 -d postgres -c 'ALTER ROLE app_role BYPASSRLS'
+pg_dumpall --globals-only > /work/globals-exempt.sql
+psql -q -v ON_ERROR_STOP=1 -d postgres -c 'ALTER ROLE app_role NOBYPASSRLS'
+
 pg_dump -Fc -d with_roles    -f /work/with-roles.dump
 pg_dump -Fc -d without_roles -f /work/without-roles.dump
 pg_dump -Fc -d empty_table   -f /work/empty-table.dump
@@ -152,8 +199,10 @@ note "without-roles.dump  $(du -h /work/without-roles.dump | cut -f1)"
 note "empty-table.dump    $(du -h /work/empty-table.dump | cut -f1)"
 note "stale-sequence.dump $(du -h /work/stale-sequence.dump | cut -f1)"
 
+note "globals.sql          $(du -h /work/globals.sql | cut -f1)"
+
 pg_ctl -D "$SRC_DATA" -m immediate stop >/dev/null 2>&1
-rm -rf /work/source
+rm -rf /work/source /work/ts
 unset PGHOST PGUSER
 note "source cluster destroyed — neither app_role nor source exists anywhere now"
 
@@ -445,6 +494,148 @@ expect "a pack that is not JSON is a usage error" 64 "$?"
 
 proofdrill drill --dump-file /work/with-roles.dump --assertions /work/does-not-exist.json
 expect "a pack that is not there is a usage error" 64 "$?"
+
+# ---------------------------------------------------------------------------
+say "2j. the cluster globals — the roles a per-database backup does not carry"
+# ---------------------------------------------------------------------------
+# Everything above this line drilled a database whose roles were placeholders
+# this agent invented so the restore could finish. The second artefact is what
+# turns them into the customer's own roles, and it is the whole of what makes
+# level 3's central question answerable.
+
+GLOBALS="$(proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 \
+           --globals-file /work/globals.sql --json)"
+expect "a drill with the cluster globals still passes" 0 "$?"
+
+for key in roles_present_with_their_attributes globals_carry_every_role_the_backup_uses \
+           no_role_is_exempt_from_a_policy_that_names_it; do
+  if printf '%s' "$GLOBALS" | tr -d ' \n' | grep -q "\"key\":\"$key\",\"outcome\":\"passed\""; then
+    printf '  [pass] %s\n' "$key"
+  else
+    printf '  [FAIL] %s did not pass\n' "$key"
+    FAILURES=$((FAILURES + 1))
+  fi
+done
+
+# The negative control. backup_role holds BYPASSRLS legitimately — whoever takes
+# the dump must, or it comes back empty — and no policy names it, so the check
+# above passed WITH an exempt role in the cluster. A check that fired here would
+# be useless the day it shipped.
+if printf '%s' "$GLOBALS" | grep -q 'backup_role (LOGIN, BYPASSRLS)'; then
+  printf '  [pass] the legitimate BYPASSRLS role is reported and is not a verdict\n'
+else
+  printf '  [FAIL] backup_role is not named in the observations\n'
+  FAILURES=$((FAILURES + 1))
+fi
+
+# What must not be in the report, and the file it came from had one in it: this
+# globals artefact was dumped WITHOUT --no-role-passwords, so it carries a SCRAM
+# verifier for backup_role. The agent drops it rather than loading it.
+for secret in SCRAM 'not-a-real-password'; do
+  if printf '%s' "$GLOBALS" | grep -q "$secret"; then
+    printf '  [FAIL] the report carries something out of the globals file: %s\n' "$secret"
+    FAILURES=$((FAILURES + 1))
+  else
+    printf '  [pass] no password verifier reaches the report (%s)\n' "$secret"
+  fi
+done
+
+# The two statements that are in every real globals file and must never run here.
+printf '%s' "$GLOBALS" | grep -q 'tablespace statement'
+expect "a CREATE TABLESPACE is refused and said out loud" 0 "$?"
+printf '%s' "$GLOBALS" | grep -q 'per-role setting'
+expect "an ALTER ROLE ... SET is refused and said out loud" 0 "$?"
+printf '%s' "$GLOBALS" | grep -q 'machine-access'
+expect "membership of pg_read_server_files is refused by name" 0 "$?"
+
+# And the line every run used to print, which was the honest admission that the
+# product's headline check could not be made.
+if printf '%s' "$GLOBALS" | grep -q 'Add the pg_dumpall --globals-only artefact'; then
+  printf '  [FAIL] the report still asks for a globals artefact it was given\n'
+  FAILURES=$((FAILURES + 1))
+else
+  printf '  [pass] the report no longer asks for the artefact it has\n'
+fi
+
+# The enforcement probe sees something it could not see before, and it is worth
+# its own check: these tables are owned by `source`, which the globals declare a
+# superuser. A superuser is never subject to row level security, so the pass this
+# same probe reports without the globals — where the owner is a placeholder that
+# is not a superuser — was describing a role that does not exist in production.
+printf '%s' "$GLOBALS" | tr -d ' \n' \
+  | grep -q '"key":"row_level_security_actually_restricts","outcome":"could_not_attempt"'
+expect "a forced table owned by a superuser is not reported as restrained" 0 "$?"
+printf '%s' "$GLOBALS" | grep -q 'owned by a superuser'
+expect "and the sentence says why, rather than blaming the policy" 0 "$?"
+
+say "2k. one ALTER on one role, and the same backup FAILS"
+# The point of the whole feature, end to end. Same artefact, same policies, same
+# 20000 rows — and a globals file in which app_role holds BYPASSRLS. Every check
+# derived from the backup still passes, because the backup really is intact. The
+# policies naming that role cannot bite, and only the second artefact can say so.
+proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 \
+  --globals-file /work/globals-exempt.sql >/dev/null
+expect "a role a policy names holding BYPASSRLS is a failed drill" 1 "$?"
+
+EXEMPT="$(proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 \
+          --globals-file /work/globals-exempt.sql --json)"
+
+printf '%s' "$EXEMPT" | tr -d ' \n' \
+  | grep -q '"key":"no_role_is_exempt_from_a_policy_that_names_it","outcome":"failed"'
+expect "and it is that check, by name" 0 "$?"
+
+printf '%s' "$EXEMPT" | grep -q 'app_role (BYPASSRLS)'
+expect "naming the role and the attribute that ended the policy" 0 "$?"
+
+for key in restore_exit_code restored_database_not_empty; do
+  printf '%s' "$EXEMPT" | tr -d ' \n' | grep -q "\"key\":\"$key\",\"outcome\":\"passed\""
+  expect "$key still passes on the failed drill" 0 "$?"
+done
+for key in rls_enabled_and_forced_preserved policies_identical grants_identical; do
+  printf '%s' "$EXEMPT" | tr -d ' \n' | grep -q "\"key\":\"$key\",\"outcome\":\"passed\""
+  expect "$key still passes on the failed drill" 0 "$?"
+done
+
+say "2l. two artefacts that no longer describe the same cluster"
+# globals-early.sql was dumped before "Reporting Role" existed — which is what a
+# weekly role dump beside a nightly backup produces. The restored database has
+# objects belonging to a role the globals artefact never mentions, and the drill
+# has to say so rather than quietly inventing it again.
+STALE_GLOBALS="$(proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 \
+                 --globals-file /work/globals-early.sql --json)"
+
+printf '%s' "$STALE_GLOBALS" | tr -d ' \n' \
+  | grep -q '"key":"globals_carry_every_role_the_backup_uses","outcome":"failed"'
+expect "a globals artefact missing a role the backup uses is a failed drill" 0 "$?"
+
+printf '%s' "$STALE_GLOBALS" | grep -q 'Reporting Role'
+expect "and the role it does not declare is named" 0 "$?"
+
+say "2m. an assertion naming a role that turns out to be a superuser"
+# pack-holds.json asks what the table owner can see, as `source`. Without the
+# globals that is a placeholder and the question is answerable. With them it is
+# the superuser it always was in production, and the refusal IS the answer.
+SUPER="$(proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 \
+         --assertions /work/pack-holds.json --globals-file /work/globals.sql --json)"
+
+printf '%s' "$SUPER" | tr -d ' \n' \
+  | grep -q '"key":"assertion_the_owner_sees_nothing_for_a_stranger","outcome":"could_not_attempt"'
+expect "an assertion naming a superuser is refused rather than run" 0 "$?"
+printf '%s' "$SUPER" | grep -q 'your own cluster globals say it is one'
+expect "and the refusal is the answer, not an obstacle" 0 "$?"
+
+say "2n. a globals pattern pointed at the wrong object"
+# The mistake a customer makes once: the pattern matches something that is not a
+# pg_dumpall --globals-only artefact. The drill goes on — this says nothing about
+# whether the backup restores — and the report says the roles are placeholders.
+WRONG="$(proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 \
+         --globals-file /work/pack-holds.json --json)"
+expect "a globals file that is not one does not stop the drill" 0 "$?"
+printf '%s' "$WRONG" | grep -q 'carries no role this agent recognises'
+expect "and it is named as the reason the roles are placeholders" 0 "$?"
+
+proofdrill drill --dump-file /work/with-roles.dump --globals-file /work/nowhere.sql
+expect "a globals file that is not there is a usage error" 64 "$?"
 
 # ---------------------------------------------------------------------------
 say "3. a valid archive with no rows must FAIL — the founding failure"

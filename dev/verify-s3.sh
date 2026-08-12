@@ -6,6 +6,12 @@
 #
 #   dev/verify-s3.sh                    (run from the repository root)
 #
+# From Git Bash on Windows, prefix it with `MSYS_NO_PATHCONV=1
+# MSYS2_ARG_CONV_EXCL='*'`. MSYS rewrites anything that looks like an absolute
+# path before docker sees it, so `--entrypoint /usr/local/bin/proofdrill` becomes
+# a path under the Git installation and every container exits 127 with a message
+# about a file on the host — which reads like a broken image and is not one.
+#
 # Everything it creates is removed on the way out, including on failure.
 set -uo pipefail
 
@@ -79,7 +85,7 @@ docker run -d --name "$MINIO" --network "$NETWORK" \
 # property this whole image is built on.
 docker run --rm --user root -v "$VOLUME":/out --entrypoint chown "$IMAGE" 10001:10001 /out
 docker run --rm -v "$VOLUME":/out --entrypoint /usr/local/bin/make-fixture.sh \
-  "$IMAGE" /out/db-2026-08-11.dump
+  "$IMAGE" /out/db-2026-08-11.dump /out/globals-2026-08-11.sql
 
 # mc retries until MinIO answers, so no sleep is needed and none is guessed at.
 docker run --rm --network "$NETWORK" -v "$VOLUME":/in --entrypoint sh minio/mc -c "
@@ -87,6 +93,7 @@ docker run --rm --network "$NETWORK" -v "$VOLUME":/in --entrypoint sh minio/mc -
   until mc alias set m http://$MINIO:9000 minioadmin minioadminsecret >/dev/null 2>&1; do sleep 1; done
   mc mb -p m/backups >/dev/null
   mc cp /in/db-2026-08-11.dump m/backups/nightly/db-2026-08-11.dump >/dev/null
+  mc cp /in/globals-2026-08-11.sql m/backups/nightly/globals-2026-08-11.sql >/dev/null
   mc cp /in/db-2026-08-11.dump 'm/backups/nightly/notes and spaces.txt' >/dev/null
   mc admin user add m $KEY $SECRET >/dev/null
   mc admin policy attach m readwrite --user $KEY >/dev/null
@@ -141,7 +148,41 @@ agent "$KEY" "$SECRET" drill \
 expect "the drill fetches, restores and passes" 0 "$?"
 
 # ---------------------------------------------------------------------------
-say "5. credentials are refused on the command line"
+say "5. the second artefact, fetched from the same bucket"
+# ---------------------------------------------------------------------------
+# The globals path that `--globals-file` cannot exercise: two objects, one
+# listing, and a pattern of its own. The unit suite reads the file and the
+# container suite applies it; only this proves the agent finds it.
+says "doctor finds the globals artefact without downloading it" "globals_artefact_found" \
+  "$(agent "$KEY" "$SECRET" doctor \
+      --s3-endpoint "http://$MINIO:9000" --s3-bucket backups \
+      --s3-prefix nightly/ --s3-pattern 'db-*.dump' \
+      --s3-globals-pattern 'globals-*.sql' --rpo-window-hours 99999 2>&1)"
+
+# A globals pattern matching nothing is NOT READY, and the sentence has to keep
+# it separate from the backup: it means level 3's role question cannot be
+# answered, not that the backup is in doubt.
+says "a globals pattern that matches nothing is a diagnosis, not a verdict on the backup" \
+  "says nothing about the backup itself" \
+  "$(agent "$KEY" "$SECRET" doctor \
+      --s3-endpoint "http://$MINIO:9000" --s3-bucket backups \
+      --s3-prefix nightly/ --s3-pattern 'db-*.dump' \
+      --s3-globals-pattern 'no-such-globals-*.sql' --rpo-window-hours 99999 2>&1)"
+
+WITH_GLOBALS="$(agent "$KEY" "$SECRET" drill \
+  --s3-endpoint "http://$MINIO:9000" --s3-bucket backups \
+  --s3-prefix nightly/ --s3-pattern 'db-*.dump' \
+  --s3-globals-pattern 'globals-*.sql' --rpo-window-hours 99999 --json 2>&1)"
+expect "a drill fetches both artefacts and passes" 0 "$?"
+
+says "the report names the globals artefact it fetched" "globals-2026-08-11.sql" "$WITH_GLOBALS"
+says "and the roles came back as the globals declare them" \
+  '"key": "roles_present_with_their_attributes",' "$WITH_GLOBALS"
+says "so the role the policy names is asked about at all" \
+  '"key": "no_role_is_exempt_from_a_policy_that_names_it",' "$WITH_GLOBALS"
+
+# ---------------------------------------------------------------------------
+say "6. credentials are refused on the command line"
 # ---------------------------------------------------------------------------
 says "a secret passed as an argument is refused, with the reason" "readable by every process" \
   "$(agent "$KEY" "$SECRET" doctor --s3-endpoint "http://$MINIO:9000" \

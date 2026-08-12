@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Writes one realistic artefact to $1, then destroys the cluster that produced
-# it — because a drill restores into a cluster that never held the original, and
-# a fixture made any other way would not exercise that.
+# Writes one realistic artefact to $1 — and, if $2 is given, the cluster globals
+# beside it — then destroys the cluster that produced them, because a drill
+# restores into a cluster that never held the original and a fixture made any
+# other way would not exercise that.
 #
 #   docker run --rm -v fixtures:/out --entrypoint /usr/local/bin/make-fixture.sh \
-#     proofdrill-agent:verify /out/db-2026-08-11.dump
+#     proofdrill-agent:verify /out/db-2026-08-11.dump /out/globals-2026-08-11.sql
 set -euo pipefail
 
-DESTINATION="${1:?usage: make-fixture.sh <destination.dump>}"
+DESTINATION="${1:?usage: make-fixture.sh <destination.dump> [globals.sql]}"
+GLOBALS="${2:-}"
 
 PG_MAJOR="$(ls /usr/lib/postgresql | sort -n | tail -1)"
 export PATH="/usr/lib/postgresql/${PG_MAJOR}/bin:${PATH}"
@@ -32,13 +34,26 @@ INSERT INTO tenant_rows (tenant_id, payload)
 SELECT gen_random_uuid(), repeat('x', 200) FROM generate_series(1, 20000);
 ALTER TABLE tenant_rows ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_rows FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON tenant_rows
+-- Named, rather than left to PUBLIC: a tenant isolation policy is written about
+-- the role the application connects as, and naming it is what lets a drill ask
+-- whether that role is exempt from it.
+CREATE POLICY tenant_isolation ON tenant_rows TO app_role
   USING (tenant_id::text = current_setting('app.tenant_id', true));
 GRANT SELECT, INSERT ON tenant_rows TO app_role;
 SQL
 
 pg_dump -Fc -d production -f "$DESTINATION"
+
+# The second artefact, and it comes from the same cluster at the same moment —
+# which is the pair a customer is asked to write beside each other nightly.
+if [ -n "$GLOBALS" ]; then
+  mkdir -p "$(dirname "$GLOBALS")"
+  pg_dumpall --globals-only --no-role-passwords > "$GLOBALS"
+fi
+
 pg_ctl -D "$DATA" -m immediate stop >/dev/null 2>&1
 rm -rf /tmp/fixture
 
 printf 'wrote %s (%s)\n' "$DESTINATION" "$(du -h "$DESTINATION" | cut -f1)"
+[ -n "$GLOBALS" ] && printf 'wrote %s (%s)\n' "$GLOBALS" "$(du -h "$GLOBALS" | cut -f1)"
+exit 0
