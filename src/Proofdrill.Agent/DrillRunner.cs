@@ -8,7 +8,8 @@ internal sealed record DrillOptions(
     int? PostgresMajor,
     bool DryRun,
     string WorkRoot,
-    double? RpoWindowHours);
+    double? RpoWindowHours,
+    AssertionPack? Assertions = null);
 
 /// <summary>
 /// One drill against one artefact, on this machine, with no network and no
@@ -84,6 +85,7 @@ internal static partial class DrillRunner
         var observations = new List<string>();
         var notAttempted = new List<string>();
         var rowCounts = new Dictionary<string, long>(StringComparer.Ordinal);
+        var pack = options.Assertions ?? AssertionPack.Empty;
 
         var file = new FileInfo(options.ArtefactPath);
         if (!file.Exists)
@@ -175,6 +177,13 @@ internal static partial class DrillRunner
             notAttempted.Add(
                 "every assertion after the artefact itself: levels 1, 2 and 3 all ask their questions of a restored " +
                 "database, and this run restored nothing");
+
+            if (!pack.IsEmpty)
+            {
+                notAttempted.Add(
+                    $"the {pack.Assertions.Count} assertion(s) in the pack: they were read and checked for shape, " +
+                    "and a dry run has no database to ask them of");
+            }
 
             return new DrillReport(
                 DrillReport.CurrentVersion, Outcome.CouldNotAttempt, AgentVersion(), major,
@@ -307,7 +316,16 @@ internal static partial class DrillRunner
 
             notAttempted.Add(
                 "level 3, application role isolation: the placeholder roles have no memberships or attributes, so " +
-                "what the real application role could read cannot be established from this artefact alone.");
+                "what the real application role could read cannot be established from this artefact alone." +
+                (pack.Assertions.Any(assertion => assertion.Role is not null)
+                    // Said whenever an assertion names a role, because the pass it
+                    // produces is the exact thing a reader will over-read. It
+                    // demonstrates what the restored policies do to a role of that
+                    // name — not that the role in production is only that.
+                    ? " An assertion below names a role, and it ran against one of those placeholders: it shows " +
+                      "what the restored database's policies do to a role of that name, not what that role holds " +
+                      "in production."
+                    : ""));
         }
 
         // The restored database's own DDL, written by the same pg_dump that wrote
@@ -462,6 +480,7 @@ internal static partial class DrillRunner
 
             var restricting = new List<string>();
             var unrestricted = new List<string>();
+            var nothingToHide = new List<string>();
 
             foreach (var row in probed)
             {
@@ -476,11 +495,31 @@ internal static partial class DrillRunner
                 }
 
                 var total = rowCounts.GetValueOrDefault(row[0], 0);
+
+                // An empty table demonstrates nothing in either direction, and
+                // reading it as "the owner sees every row" is how this check
+                // produced `0 of 0 rows visible` — a sentence that is true, reads
+                // as an alarm, and says nothing. It comes up on the archive this
+                // product was built to catch, which is the worst place for a line
+                // nobody can act on.
+                if (total == 0)
+                {
+                    nothingToHide.Add(row[0]);
+                    continue;
+                }
+
                 (visible < total ? restricting : unrestricted).Add(
                     $"{row[0]}: {visible} of {total} rows visible to {row[1]}");
             }
 
-            if (unrestricted.Count == 0)
+            if (restricting.Count == 0 && unrestricted.Count == 0)
+            {
+                level3.Add(new Check("row_level_security_actually_restricts", Outcome.CouldNotAttempt,
+                    $"every forced table probed came back empty ({string.Join(", ", nothingToHide)}), so there is " +
+                    "nothing for a policy to hide and nothing to demonstrate. Whether the archive should have been " +
+                    "empty is a level 1 question, and it is answered above."));
+            }
+            else if (unrestricted.Count == 0)
             {
                 level3.Add(new Check("row_level_security_actually_restricts", Outcome.Passed,
                     $"with no tenant context set, the owner sees fewer rows than the whole table on all " +
@@ -496,11 +535,37 @@ internal static partial class DrillRunner
                 level3.Add(new Check("row_level_security_actually_restricts", Outcome.CouldNotAttempt,
                     $"the owner still sees every row of {string.Join("; ", unrestricted)}. That is what a policy " +
                     "which permits everything looks like, and it is also what a lost guarantee looks like; the two " +
-                    "are told apart by a customer SQL assertion, which this build does not support."));
+                    "are told apart by a customer SQL assertion, and " + (pack.IsEmpty
+                        ? "this run carried no pack. One assertion — what a named role can see with no tenant " +
+                          "set — turns this line into a verdict."
+                        : $"this run evaluated {pack.Assertions.Count} of them, below.")));
             }
         }
 
-        notAttempted.Add("level 3, customer SQL assertions: not implemented yet");
+        // The customer's own questions, asked last because they are asked of a
+        // database that has already been compared against its artefact: an
+        // assertion that fails against a database which lost a policy is a
+        // consequence, and the line above it says so.
+        if (pack.IsEmpty)
+        {
+            notAttempted.Add(
+                "level 3, customer SQL assertions: " +
+                (pack.Origin is { Length: > 0 } refused ? refused : "none were given") +
+                ". The checks above are derived from the artefact and hold for any database; what only you can " +
+                "ask — that a named role sees nothing without a tenant, that a view still hides a column — goes " +
+                "in an assertion pack. See protocol/v1/ASSERTIONS.md.");
+        }
+        else
+        {
+            observations.Add(
+                $"{pack.Assertions.Count} customer assertion(s) were evaluated, from {pack.Origin}, as the " +
+                $"{AssertionRunner.Role} role: no superuser, no ability to run a program or read a file, and a " +
+                "read only transaction");
+
+            level3.AddRange(await AssertionRunner
+                .RunAsync(cluster, RestoredDatabase, pack, observations, notAttempted, cancellationToken)
+                .ConfigureAwait(false));
+        }
 
         // A level 2 or level 3 failure is a failed drill. That is the whole
         // product: a backup that restores with every row in place and its

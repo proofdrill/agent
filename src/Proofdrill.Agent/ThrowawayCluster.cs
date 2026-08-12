@@ -111,6 +111,12 @@ internal sealed class ThrowawayCluster : IAsyncDisposable
         info.ArgumentList.Add("-h");
         info.ArgumentList.Add("");
 
+        // The server must not inherit the registration token or the storage keys.
+        // It is about to run SQL that the customer wrote and that may have
+        // travelled from the control plane, and an environment is readable from
+        // inside a database by anything privileged enough to read it.
+        Processes.WithoutSecrets(info);
+
         _postmaster = Process.Start(info)
             ?? throw new DrillCannotBeAttemptedException("the throwaway PostgreSQL would not start");
 
@@ -171,6 +177,48 @@ internal sealed class ThrowawayCluster : IAsyncDisposable
             timeout ?? TimeSpan.FromMinutes(2),
             cancellationToken);
 
+    /// <summary>
+    /// Runs a statement <b>as</b> another role, by connecting as that role.
+    /// <para>
+    /// Not <c>SET ROLE</c> from our own session, and the difference is the whole
+    /// boundary around a customer's assertion: a session whose session role is
+    /// the superuser can <c>RESET ROLE</c> and take it back, so anything running
+    /// under <c>SET ROLE</c> is limited by convention. Connecting as the role
+    /// makes the server hold the limit instead — trust authentication over the
+    /// private socket is what allows it without a password.
+    /// </para>
+    /// <para>
+    /// Errors come back verbose so that the SQLSTATE can be read out of them.
+    /// Rule 8: the message is localised and quotes data, the code is neither.
+    /// </para>
+    /// </summary>
+    public Task<ProcessResult> QueryAsAsync(
+        string user,
+        string database,
+        string sql,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var environment = new Dictionary<string, string>(Environment(), StringComparer.Ordinal)
+        {
+            ["PGUSER"] = user,
+        };
+
+        return Processes.RunAsync(
+            _binaries.Psql,
+            [
+                "--quiet", "--tuples-only", "--no-align",
+                "--field-separator", Separator,
+                "--variable", "ON_ERROR_STOP=1",
+                "--variable", "VERBOSITY=verbose",
+                "--dbname", database,
+                "--command", sql,
+            ],
+            environment,
+            timeout,
+            cancellationToken);
+    }
+
     public static IEnumerable<string[]> Rows(ProcessResult result) =>
         result.StandardOutput
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -206,9 +254,15 @@ internal sealed class ThrowawayCluster : IAsyncDisposable
         ["PGUSER"] = SuperUser,
         ["PGDATABASE"] = "postgres",
         // A drill runs on a machine nobody is watching, so an interactive
-        // password prompt would not fail — it would hang. Trust authentication
-        // over a private socket is what makes that safe.
-        ["PGPASSFILE"] = "/dev/null",
+        // password prompt would not fail — it would hang, and a ~/.pgpass
+        // belonging to whoever runs the container is not ours to read. Trust
+        // authentication over a private socket is what makes that safe.
+        //
+        // A path that does not exist, and NOT /dev/null: psql warns that the
+        // password file is not a plain file, on every connection. That warning is
+        // in the standard error this agent now shows a customer when their own
+        // assertion fails to run, where it reads as part of the failure.
+        ["PGPASSFILE"] = Path.Combine(_root, "no-password-file"),
     };
 
     /// <summary>

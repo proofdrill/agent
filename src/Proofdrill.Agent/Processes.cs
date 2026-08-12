@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Text;
+using Proofdrill.Agent.Protocol;
+using Proofdrill.Agent.Storage;
 
 namespace Proofdrill.Agent;
 
@@ -21,6 +23,26 @@ internal sealed record ProcessResult(int ExitCode, string StandardOutput, string
 /// </summary>
 internal static class Processes
 {
+    /// <summary>
+    /// What no child of this agent has any use for: the registration token and
+    /// the storage keys.
+    /// <para>
+    /// A child process inherits the environment, so without this the customer's
+    /// read-only backup keys are sitting in the memory of a PostgreSQL server
+    /// that is about to run SQL somebody else wrote. Nothing here needs them —
+    /// the fetch is done by this process over HTTP before the cluster exists —
+    /// and removing them means the boundary around a customer assertion does not
+    /// rest on that SQL being unable to reach `COPY … FROM PROGRAM`. It cannot,
+    /// and there is nothing there to read either way.
+    /// </para>
+    /// </summary>
+    private static readonly string[] Secrets =
+    [
+        ReportEnvelope.TokenVariable,
+        ArtefactLocator.AccessKeyVariable,
+        ArtefactLocator.SecretKeyVariable,
+    ];
+
     public static async Task<ProcessResult> RunAsync(
         string fileName,
         IReadOnlyList<string> arguments,
@@ -47,6 +69,8 @@ internal static class Processes
                 info.Environment[key] = value;
             }
         }
+
+        WithoutSecrets(info);
 
         using var process = new Process { StartInfo = info };
         var stdout = new StringBuilder();
@@ -84,6 +108,21 @@ internal static class Processes
         }
 
         return new ProcessResult(process.ExitCode, stdout.ToString(), stderr.ToString());
+    }
+
+    /// <summary>
+    /// Strips <see cref="Secrets"/> from what a child process will inherit. Public
+    /// to this assembly because the postmaster is started directly rather than
+    /// through <see cref="RunAsync"/> — it is a long-lived process this agent
+    /// watches, not a command it waits for — and it is the one child that must
+    /// most certainly not carry them.
+    /// </summary>
+    public static void WithoutSecrets(ProcessStartInfo info)
+    {
+        foreach (var name in Secrets)
+        {
+            info.Environment.Remove(name);
+        }
     }
 
     private static void TryKill(Process process)
