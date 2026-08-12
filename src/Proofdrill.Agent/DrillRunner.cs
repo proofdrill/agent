@@ -3,13 +3,29 @@ using System.Text.RegularExpressions;
 
 namespace Proofdrill.Agent;
 
+/// <summary>
+/// The second artefact — <c>pg_dumpall --globals-only</c> — as it was found. The
+/// roles are cluster-wide, so they are never inside a per-database archive, and
+/// without them level 3's central question has no role to ask about.
+/// </summary>
+internal sealed record GlobalsArtefact(string Path, string Name, long SizeBytes, DateTimeOffset LastModified);
+
 internal sealed record DrillOptions(
     string ArtefactPath,
     int? PostgresMajor,
     bool DryRun,
     string WorkRoot,
     double? RpoWindowHours,
-    AssertionPack? Assertions = null);
+    AssertionPack? Assertions = null,
+    GlobalsArtefact? Globals = null,
+    string? GlobalsNote = null);
+
+/// <summary>
+/// What a globals artefact contributed, once it had been read and applied. Null
+/// everywhere else means the same thing it has always meant: the roles in this
+/// cluster are placeholders this agent invented so the restore could finish.
+/// </summary>
+internal sealed record AppliedGlobals(IReadOnlyList<DeclaredRole> Roles, IReadOnlyList<string> Failures);
 
 /// <summary>
 /// One drill against one artefact, on this machine, with no network and no
@@ -185,6 +201,13 @@ internal static partial class DrillRunner
                     "and a dry run has no database to ask them of");
             }
 
+            if (options.Globals is { } skipped)
+            {
+                notAttempted.Add(
+                    $"the cluster globals in '{skipped.Name}': there is no cluster to put the roles into, so " +
+                    "whether any of them is exempt from a policy that names it was not asked");
+            }
+
             return new DrillReport(
                 DrillReport.CurrentVersion, Outcome.CouldNotAttempt, AgentVersion(), major,
                 startedAt, artefactFacts, new Measurements(Math.Round(ageHours, 2), null),
@@ -196,6 +219,15 @@ internal static partial class DrillRunner
         await cluster.CreateAsync(ClusterEncoding(contents.Shape.Encoding, observations), cancellationToken)
             .ConfigureAwait(false);
         await cluster.StartAsync(cancellationToken).ConfigureAwait(false);
+
+        // Before the database and before the restore. The roles the artefact's
+        // objects belong to have to exist for ownership and grants to land at all,
+        // and whether they are the customer's own roles or empty placeholders is
+        // the difference between level 3 answering its central question and
+        // reporting that it cannot.
+        var globals = await ApplyGlobalsAsync(
+                cluster, options.Globals, artefactFacts, observations, notAttempted, cancellationToken)
+            .ConfigureAwait(false);
 
         var created = await cluster.QueryAsync("postgres", $"CREATE DATABASE {RestoredDatabase}", cancellationToken)
             .ConfigureAwait(false);
@@ -303,7 +335,7 @@ internal static partial class DrillRunner
 
         // Spike 0's finding, reported as what it is. Not a failed drill: an
         // artefact that cannot answer the question, with the instruction attached.
-        if (invented.Count > 0)
+        if (invented.Count > 0 && globals is null)
         {
             observations.Add(
                 $"the artefact does not carry the cluster globals, so {invented.Count} role(s) were created empty to " +
@@ -311,8 +343,10 @@ internal static partial class DrillRunner
 
             notAttempted.Add(
                 "level 3, role attributes: roles are cluster-wide and a per-database pg_dump does not contain them, " +
-                "so whether any role holds BYPASSRLS cannot be tested. Add the pg_dumpall --globals-only artefact " +
-                "to this target and it becomes testable. This is a correction, not a verdict.");
+                "so whether any role holds BYPASSRLS cannot be tested. " +
+                (options.GlobalsNote
+                 ?? "Add the pg_dumpall --globals-only artefact to this target and it becomes testable.") +
+                " This is a correction, not a verdict.");
 
             notAttempted.Add(
                 "level 3, application role isolation: the placeholder roles have no memberships or attributes, so " +
@@ -407,7 +441,10 @@ internal static partial class DrillRunner
 
         await MeasureSequencesAsync(cluster, level2, observations, cancellationToken).ConfigureAwait(false);
 
-        var serverEncoding = (await cluster.QueryAsync(RestoredDatabase, "SHOW server_encoding", cancellationToken)
+        await MeasureRolesAsync(cluster, level2, globals, invented, observations, cancellationToken)
+            .ConfigureAwait(false);
+
+        var serverEncoding =(await cluster.QueryAsync(RestoredDatabase, "SHOW server_encoding", cancellationToken)
             .ConfigureAwait(false)).StandardOutput.Trim();
 
         if (declaredShape.Encoding is { Length: > 0 } declaredEncoding)
@@ -446,6 +483,8 @@ internal static partial class DrillRunner
         Compare(level3, "grants_identical",
             contents.Declared.Grants, restored.Grants, "grant");
 
+        await ExemptionAsync(cluster, level3, globals, notAttempted, cancellationToken).ConfigureAwait(false);
+
         // Behaviour, not flags. Rule 7 of this repository: the agent is superuser
         // of its own cluster and a superuser bypasses row level security, so
         // "I could read the table" proves nothing. The owner is the interesting
@@ -453,12 +492,14 @@ internal static partial class DrillRunner
         // owner is not exempt.
         var forced = ThrowawayCluster.Rows(await cluster.QueryAsync(RestoredDatabase,
             """
-            SELECT n.nspname || '.' || c.relname, pg_get_userbyid(c.relowner)
-            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            SELECT n.nspname || '.' || c.relname, pg_get_userbyid(c.relowner), o.rolsuper
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_roles o ON o.oid = c.relowner
             WHERE c.relkind = 'r' AND c.relrowsecurity AND c.relforcerowsecurity
               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
             ORDER BY 1
-            """, cancellationToken).ConfigureAwait(false)).Where(row => row.Length == 2).ToList();
+            """, cancellationToken).ConfigureAwait(false)).Where(row => row.Length == 3).ToList();
 
         if (forced.Count == 0)
         {
@@ -481,9 +522,23 @@ internal static partial class DrillRunner
             var restricting = new List<string>();
             var unrestricted = new List<string>();
             var nothingToHide = new List<string>();
+            var superuserOwned = new List<string>();
 
             foreach (var row in probed)
             {
+                // A superuser is exempt from row level security unconditionally,
+                // and FORCE cannot restrain one — forcing applies to the owner, and
+                // this owner would bypass the policy whatever the flag says. It is
+                // a fact about the customer's cluster rather than about the
+                // restore, and it only becomes visible once the real roles are
+                // here: with placeholder roles every owner is an ordinary role and
+                // this branch never fires.
+                if (row[2].StartsWith('t'))
+                {
+                    superuserOwned.Add($"{row[0]} (owned by {row[1]})");
+                    continue;
+                }
+
                 var owner = row[1].Replace("\"", "\"\"", StringComparison.Ordinal);
                 var asOwner = await cluster.QueryAsync(RestoredDatabase,
                     $"SET ROLE \"{owner}\"; SELECT count(*) FROM {row[0]}", cancellationToken).ConfigureAwait(false);
@@ -512,7 +567,16 @@ internal static partial class DrillRunner
                     $"{row[0]}: {visible} of {total} rows visible to {row[1]}");
             }
 
-            if (restricting.Count == 0 && unrestricted.Count == 0)
+            if (restricting.Count == 0 && unrestricted.Count == 0 && superuserOwned.Count > 0)
+            {
+                level3.Add(new Check("row_level_security_actually_restricts", Outcome.CouldNotAttempt,
+                    $"every forced table probed is owned by a superuser: {string.Join(", ", superuserOwned)}. A " +
+                    "superuser is never subject to row level security, so FORCE ROW LEVEL SECURITY — which exists " +
+                    "to restrain a table's owner — cannot restrain this one. That is a fact about the cluster the " +
+                    "backup came from, not about the restore, and an assertion naming the role your application " +
+                    "connects as is what turns it into a verdict."));
+            }
+            else if (restricting.Count == 0 && unrestricted.Count == 0)
             {
                 level3.Add(new Check("row_level_security_actually_restricts", Outcome.CouldNotAttempt,
                     $"every forced table probed came back empty ({string.Join(", ", nothingToHide)}), so there is " +
@@ -523,7 +587,24 @@ internal static partial class DrillRunner
             {
                 level3.Add(new Check("row_level_security_actually_restricts", Outcome.Passed,
                     $"with no tenant context set, the owner sees fewer rows than the whole table on all " +
-                    $"{restricting.Count} forced table(s): {string.Join("; ", restricting)}"));
+                    $"{restricting.Count} forced table(s): {string.Join("; ", restricting)}" +
+                    (superuserOwned.Count == 0
+                        ? ""
+                        : $". A further {superuserOwned.Count} forced table(s) are owned by a superuser, which no " +
+                          $"policy applies to, so they were not probed: {string.Join(", ", superuserOwned)}")));
+            }
+            else if (superuserOwned.Count > 0)
+            {
+                // Both kinds in one database. The sentence has to keep them apart:
+                // an owner who sees everything because a policy permits it is a
+                // different finding from an owner who sees everything because no
+                // policy can apply to a superuser.
+                level3.Add(new Check("row_level_security_actually_restricts", Outcome.CouldNotAttempt,
+                    $"the owner still sees every row of {string.Join("; ", unrestricted)}, and a further " +
+                    $"{superuserOwned.Count} forced table(s) are owned by a superuser, which no policy applies to: " +
+                    $"{string.Join(", ", superuserOwned)}. The first is what a permissive policy and a lost " +
+                    "guarantee both look like; the second is neither, and both are told apart by an assertion " +
+                    "naming the role your application connects as."));
             }
             else
             {
@@ -560,10 +641,14 @@ internal static partial class DrillRunner
             observations.Add(
                 $"{pack.Assertions.Count} customer assertion(s) were evaluated, from {pack.Origin}, as the " +
                 $"{AssertionRunner.Role} role: no superuser, no ability to run a program or read a file, and a " +
-                "read only transaction");
+                "read only transaction" + (globals is null
+                    ? ""
+                    : ". An assertion naming a role in `as` became that role as your own cluster globals declare " +
+                      "it, with its attributes and its memberships"));
 
             level3.AddRange(await AssertionRunner
-                .RunAsync(cluster, RestoredDatabase, pack, observations, notAttempted, cancellationToken)
+                .RunAsync(cluster, RestoredDatabase, pack, globals is not null, observations, notAttempted,
+                    cancellationToken)
                 .ConfigureAwait(false));
         }
 
@@ -580,6 +665,295 @@ internal static partial class DrillRunner
             DrillReport.CurrentVersion, outcome, AgentVersion(), major, startedAt, artefactFacts,
             new Measurements(Math.Round(ageHours, 2), Math.Round(clock.Elapsed.TotalSeconds, 3)),
             checks, level2, level3, rowCounts, observations, notAttempted);
+    }
+
+    /// <summary>
+    /// Reads the second artefact and puts the customer's own roles into the
+    /// throwaway cluster — the step that turns level 3's central question from
+    /// something the report says it cannot answer into something it answers.
+    /// <para>
+    /// <b>The file is read, not executed.</b> What runs is a list of statements
+    /// this agent wrote from what it recognised, because a globals artefact is
+    /// plain SQL out of somebody's bucket and three kinds of statement in one must
+    /// never run here — <see cref="GlobalsDdl"/> says which and why. Everything it
+    /// declined is reported: a reader who is told the globals were applied would
+    /// otherwise assume all of them were.
+    /// </para>
+    /// <para>
+    /// Every failure here is a correction and never a verdict. A globals artefact
+    /// that cannot be read says nothing about whether the backup restores, so the
+    /// drill goes on without it and the report says the roles are placeholders —
+    /// which is exactly where this product was before this artefact existed.
+    /// </para>
+    /// </summary>
+    private static async Task<AppliedGlobals?> ApplyGlobalsAsync(
+        ThrowawayCluster cluster,
+        GlobalsArtefact? artefact,
+        ArtefactFacts backup,
+        List<string> observations,
+        List<string> notAttempted,
+        CancellationToken cancellationToken)
+    {
+        if (artefact is null)
+        {
+            return null;
+        }
+
+        string text;
+        try
+        {
+            text = await File.ReadAllTextAsync(artefact.Path, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            notAttempted.Add(
+                $"the cluster globals: '{artefact.Name}' could not be read ({exception.Message}), so the roles in " +
+                "this drill are placeholders and level 3's role questions were not asked.");
+            return null;
+        }
+
+        var globals = GlobalsDdl.Read(text, [ThrowawayCluster.SuperUser, AssertionRunner.Role]);
+
+        foreach (var sentence in globals.Refused)
+        {
+            notAttempted.Add($"the cluster globals, not applied — {sentence}");
+        }
+
+        if (globals.IsEmpty)
+        {
+            notAttempted.Add(
+                $"the cluster globals: '{artefact.Name}' carries no role this agent recognises. A globals artefact " +
+                "is what `pg_dumpall --globals-only` writes; if that pattern is matching something else in the " +
+                "bucket, the roles in this drill are placeholders and level 3's role questions were not asked.");
+            return null;
+        }
+
+        var statements = GlobalsDdl.Statements(globals);
+        var applied = statements.Take(GlobalsDdl.StatementCeiling).ToList();
+        if (statements.Count > applied.Count)
+        {
+            // Never a silent cap, here least of all: the roles that fell off the
+            // end are the ones a later check would report as missing, and a reader
+            // would take that for a finding about their backup.
+            notAttempted.Add(
+                $"the cluster globals: '{artefact.Name}' asks for {statements.Count} statements and this agent " +
+                $"applies at most {GlobalsDdl.StatementCeiling} in one drill, so {statements.Count - applied.Count} " +
+                "were not applied. The roles below that are reported as missing may be among them.");
+        }
+
+        var failures = new List<string>();
+        foreach (var statement in applied)
+        {
+            var result = await cluster.QueryAsync("postgres", statement, cancellationToken).ConfigureAwait(false);
+            if (!result.Succeeded)
+            {
+                failures.Add($"{statement} — {FirstErrors(result.StandardError)}");
+            }
+        }
+
+        var written = (artefact.LastModified - backup.LastModified).TotalHours;
+        observations.Add(
+            $"the cluster globals came from '{artefact.Name}' ({Bytes(artefact.SizeBytes)}, written " +
+            $"{Math.Abs(written):0.0} h {(written < 0 ? "before" : "after")} the backup): " +
+            $"{globals.Roles.Count} role(s) and {globals.Memberships.Count} membership(s), applied with their " +
+            "attributes and without their password verifiers, connection limits or validity dates — none of those " +
+            "is readable from a report and this cluster has no listener to authenticate anybody against");
+
+        // The authorization model, in one line, for the person who has to describe
+        // it to an auditor. It is the sentence that cannot be written without this
+        // artefact, and it is worth its own place in the report even when every
+        // check below passes.
+        var powerful = globals.Roles
+            .Where(role => role.Attributes.Superuser || role.Attributes.BypassRls)
+            .Select(role => $"{role.Name} ({role.Attributes.Held()})")
+            .ToList();
+
+        observations.Add(powerful.Count == 0
+            ? "no role in the cluster globals holds SUPERUSER or BYPASSRLS, so every role there is subject to the " +
+              "policies written about it"
+            : $"{powerful.Count} role(s) in the cluster globals are exempt from row level security, because a " +
+              $"superuser always is and BYPASSRLS says so outright: {string.Join(", ", powerful)}");
+
+        return new AppliedGlobals(globals.Roles, failures);
+    }
+
+    /// <summary>
+    /// Level 2's role questions, and they exist only when a globals artefact was
+    /// applied: without one there are no declared attributes to compare against
+    /// and the report says so under what it did not check.
+    /// <para>
+    /// The second of the two is the one worth having. A backup and a globals
+    /// artefact that disagree about which roles exist are not a matched pair —
+    /// the file is older than the database it is supposed to describe, or it was
+    /// truncated, or it came from a different cluster — and the symptom is a
+    /// restored database whose objects belong to roles nobody can describe.
+    /// </para>
+    /// </summary>
+    private static async Task MeasureRolesAsync(
+        ThrowawayCluster cluster,
+        List<Check> level2,
+        AppliedGlobals? globals,
+        IReadOnlyList<string> invented,
+        List<string> observations,
+        CancellationToken cancellationToken)
+    {
+        if (globals is null)
+        {
+            return;
+        }
+
+        var probe = await cluster.QueryAsync("postgres",
+            """
+            SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb,
+                   rolcanlogin, rolreplication, rolbypassrls
+            FROM pg_roles
+            ORDER BY 1
+            """, cancellationToken).ConfigureAwait(false);
+
+        if (!probe.Succeeded)
+        {
+            level2.Add(new Check("roles_present_with_their_attributes", Outcome.CouldNotAttempt,
+                probe.Describe("asking the restored cluster about its roles")));
+            return;
+        }
+
+        var actual = new Dictionary<string, RoleAttributes>(StringComparer.Ordinal);
+        foreach (var row in ThrowawayCluster.Rows(probe).Where(row => row.Length == 8))
+        {
+            actual[row[0]] = new RoleAttributes(
+                Superuser: row[1].StartsWith('t'),
+                Inherit: row[2].StartsWith('t'),
+                CreateRole: row[3].StartsWith('t'),
+                CreateDb: row[4].StartsWith('t'),
+                Login: row[5].StartsWith('t'),
+                Replication: row[6].StartsWith('t'),
+                BypassRls: row[7].StartsWith('t'));
+        }
+
+        var wrong = new List<string>();
+        foreach (var role in globals.Roles)
+        {
+            if (!actual.TryGetValue(role.Name, out var found))
+            {
+                wrong.Add($"{role.Name} is not in the restored cluster at all");
+                continue;
+            }
+
+            var differences = role.Attributes.Differences(found);
+            if (differences.Count > 0)
+            {
+                wrong.Add($"{role.Name}: {string.Join(", ", differences)}");
+            }
+        }
+
+        // A statement that failed is why a role is missing, so it belongs in the
+        // same sentence rather than in a separate line somebody has to join up.
+        var refusals = globals.Failures.Count == 0
+            ? ""
+            : $" {globals.Failures.Count} statement(s) out of the globals artefact did not apply: " +
+              string.Join(" | ", globals.Failures);
+
+        level2.Add(wrong.Count == 0
+            ? new Check("roles_present_with_their_attributes", Outcome.Passed,
+                $"all {globals.Roles.Count} role(s) the globals artefact declares are in the restored cluster with " +
+                $"the attributes it declared{refusals}")
+            : new Check("roles_present_with_their_attributes", Outcome.Failed,
+                $"{wrong.Count} of {globals.Roles.Count} role(s) did not come back as declared: " +
+                $"{string.Join("; ", wrong)}.{refusals}"));
+
+        level2.Add(invented.Count == 0
+            ? new Check("globals_carry_every_role_the_backup_uses", Outcome.Passed,
+                "every role the backup's objects belong to or grant to is declared by the globals artefact, so the " +
+                "two artefacts describe the same cluster")
+            : new Check("globals_carry_every_role_the_backup_uses", Outcome.Failed,
+                $"the globals artefact does not declare {invented.Count} role(s) the backup's own objects reference: " +
+                $"{string.Join(", ", invented)}. They were created empty so the restore could finish, and what they " +
+                "hold in production is in neither artefact. A globals file older than the backup beside it, a " +
+                "truncated one, and one taken from a different cluster all look like this."));
+
+        if (invented.Count > 0)
+        {
+            observations.Add(
+                $"{invented.Count} role(s) were created empty because the globals artefact does not declare them: " +
+                string.Join(", ", invented));
+        }
+    }
+
+    /// <summary>
+    /// The question this whole second artefact exists for: <b>is any role a policy
+    /// names exempt from it?</b>
+    /// <para>
+    /// A policy that names a role exists in order to restrain that role. A role
+    /// holding <c>BYPASSRLS</c> is exempt from every policy in the database, and a
+    /// superuser is exempt whether anybody said so or not — so a database can come
+    /// back with every row in place, every policy byte-identical to the artefact's,
+    /// forced row level security on every table, and the policies still cannot
+    /// bite. Nothing derived from a per-database dump can see it, because the
+    /// attribute that decides it is cluster-wide and is not in that file.
+    /// </para>
+    /// <para>
+    /// Read from <c>pg_policy.polroles</c> rather than from the DDL: it is the
+    /// catalogue's own answer to "which roles is this policy about", and it holds
+    /// the roles as they are after the restore. <c>0</c> in that array is PUBLIC,
+    /// which is not a role and never joins.
+    /// </para>
+    /// </summary>
+    private static async Task ExemptionAsync(
+        ThrowawayCluster cluster,
+        List<Check> level3,
+        AppliedGlobals? globals,
+        List<string> notAttempted,
+        CancellationToken cancellationToken)
+    {
+        if (globals is null)
+        {
+            // Said once, by the caller, with the instruction attached: without the
+            // globals artefact there is no attribute to read, and a check that
+            // reported "no role is exempt" from a cluster whose roles are all
+            // placeholders would be a false pass on the sharpest question here.
+            return;
+        }
+
+        var probe = await cluster.QueryAsync(RestoredDatabase,
+            """
+            SELECT r.rolname, r.rolsuper, r.rolbypassrls
+            FROM pg_policy p, unnest(p.polroles) AS named(oid), pg_roles r
+            WHERE r.oid = named.oid
+            GROUP BY 1, 2, 3
+            ORDER BY 1
+            """, cancellationToken).ConfigureAwait(false);
+
+        if (!probe.Succeeded)
+        {
+            level3.Add(new Check("no_role_is_exempt_from_a_policy_that_names_it", Outcome.CouldNotAttempt,
+                probe.Describe("asking the restored database which roles its policies name")));
+            return;
+        }
+
+        var named = ThrowawayCluster.Rows(probe).Where(row => row.Length == 3).ToList();
+        if (named.Count == 0)
+        {
+            notAttempted.Add(
+                "level 3, role exemption: no policy in the restored database names a role — they all apply to " +
+                "PUBLIC — so there is no named role that could be exempt from one. The cluster globals were still " +
+                "read, and which roles hold SUPERUSER or BYPASSRLS is in the observations.");
+            return;
+        }
+
+        var exempt = named
+            .Where(row => row[1].StartsWith('t') || row[2].StartsWith('t'))
+            .Select(row => $"{row[0]} ({(row[1].StartsWith('t') ? "SUPERUSER" : "BYPASSRLS")})")
+            .ToList();
+
+        level3.Add(exempt.Count == 0
+            ? new Check("no_role_is_exempt_from_a_policy_that_names_it", Outcome.Passed,
+                $"all {named.Count} role(s) named by a policy in this database are subject to it: none of them holds " +
+                "SUPERUSER, and none holds BYPASSRLS")
+            : new Check("no_role_is_exempt_from_a_policy_that_names_it", Outcome.Failed,
+                $"{exempt.Count} of {named.Count} role(s) named by a policy are exempt from every policy in this " +
+                $"database: {string.Join(", ", exempt)}. A policy naming a role exists to restrain that role, and " +
+                "BYPASSRLS and SUPERUSER are read before any policy is. The rows came back, the policies are " +
+                "identical to the artefact's, and they cannot bite this role."));
     }
 
     /// <summary>
@@ -682,8 +1056,8 @@ internal static partial class DrillRunner
         if (declared.Count == 0)
         {
             checks.Add(new Check(key, Outcome.CouldNotAttempt,
-                $"the artefact declares no {noun}, so there is nothing to preserve. " +
-                (restored.Count == 0 ? "" : $"The restored database has {restored.Count}, which it should not.")));
+                $"the artefact declares no {noun}, so there is nothing to preserve." +
+                (restored.Count == 0 ? "" : $" The restored database has {restored.Count}, which it should not.")));
             return;
         }
 

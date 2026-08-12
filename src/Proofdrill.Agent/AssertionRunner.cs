@@ -77,10 +77,17 @@ internal static partial class AssertionRunner
     /// correction and never a verdict, exactly like every other could-not-attempt
     /// in this product.
     /// </summary>
+    /// <param name="rolesAreReal">
+    /// Whether a globals artefact was applied, which decides what a role this pack
+    /// names actually is. Without one, every role here is an empty placeholder the
+    /// agent invented so the restore could finish, and a refusal that did not say
+    /// so would send somebody looking for a typo in their own configuration.
+    /// </param>
     public static async Task<IReadOnlyList<Check>> RunAsync(
         ThrowawayCluster cluster,
         string database,
         AssertionPack pack,
+        bool rolesAreReal,
         List<string> observations,
         List<string> notAttempted,
         CancellationToken cancellationToken)
@@ -96,7 +103,7 @@ internal static partial class AssertionRunner
             return checks;
         }
 
-        var roles = await RolesAsync(cluster, database, pack, cancellationToken).ConfigureAwait(false);
+        var roles = await RolesAsync(cluster, database, pack, rolesAreReal, cancellationToken).ConfigureAwait(false);
         var clock = Stopwatch.StartNew();
 
         foreach (var assertion in pack.Assertions)
@@ -224,6 +231,7 @@ internal static partial class AssertionRunner
         ThrowawayCluster cluster,
         string database,
         AssertionPack pack,
+        bool rolesAreReal,
         CancellationToken cancellationToken)
     {
         var refused = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -242,9 +250,13 @@ internal static partial class AssertionRunner
 
             if (!found.Succeeded || answer.Length == 0)
             {
-                refused[role] = $"the restored cluster has no role called '{role}'. A per-database artefact does " +
-                    "not carry roles at all, so the only ones here are those the artefact referenced and this " +
-                    "agent created empty to let the restore finish.";
+                refused[role] = rolesAreReal
+                    ? $"the restored cluster has no role called '{role}'. The cluster globals for this target were " +
+                      "applied and they do not declare it, so it is not a role in the cluster the backup came from " +
+                      "either — this is a name, not a missing grant."
+                    : $"the restored cluster has no role called '{role}'. A per-database artefact does not carry " +
+                      "roles at all, so the only ones here are those the artefact referenced and this agent " +
+                      "created empty to let the restore finish.";
                 continue;
             }
 
@@ -252,7 +264,14 @@ internal static partial class AssertionRunner
             {
                 refused[role] = $"'{role}' is a superuser in the restored cluster, and this agent does not run a " +
                     "customer statement as a superuser: a superuser can read files and run programs on this " +
-                    "machine. Ask that question of the catalogue instead.";
+                    "machine. Ask that question of the catalogue instead." + (rolesAreReal
+                        // With the real globals applied this is no longer a fact
+                        // about our placeholder — it is what that role is in the
+                        // cluster the backup came from, and it is the answer to
+                        // the question the assertion was asking.
+                        ? " It is a superuser because your own cluster globals say it is one, which is itself the " +
+                          "answer to any assertion about what that role cannot read: a superuser reads everything."
+                        : "");
                 continue;
             }
 
