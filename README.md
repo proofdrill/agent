@@ -1,6 +1,8 @@
 # Proofdrill agent
 
-> **Status: early development. There is no release and no published image.**
+> **Status: first release.** The image is published, and the control plane it
+> reports to is new — so the honest description is software that does what this
+> page says and has not yet been run by many people.
 > `proofdrill drill` restores a `pg_dump -Fc` archive into a throwaway
 > PostgreSQL and runs the **level 1, 2 and 3** assertions against it —
 > including the **role attributes** read from your
@@ -142,7 +144,19 @@ docker run --rm --cap-drop=ALL \
 itself. Credentials are read from the environment and are never accepted as
 arguments: a command line is readable by every process on the machine.
 
-When there is a release this becomes one `docker run` of a published image.
+The published image saves you the build:
+
+```
+docker run --rm --cap-drop=ALL --security-opt=no-new-privileges \
+  -v "$PWD:/artefacts:ro" ghcr.io/proofdrill/agent:1 \
+  drill --dump-file /artefacts/your-backup.dump --rpo-window-hours 24
+```
+
+`:1` moves with each release inside major 1, and moving is not updating: Docker
+never re-pulls on its own, so a container you started keeps the image it has
+until you decide otherwise. Pin `:1.0.0` if you would rather say when. There is
+no `latest`, deliberately — it is the tag people use when they have not thought
+about versions, and this runs in your production network.
 
 ## The report, and the two signatures on it
 
