@@ -1,0 +1,144 @@
+name: Release
+
+# Publishes the agent image. This is the only artefact of this repository that
+# other people run, so the rules here are stricter than the control plane's
+# equivalent — the thing being pushed lands inside somebody else's perimeter and
+# nothing auto-updates it once it does.
+#
+# THE VERIFICATION RUNS BEFORE THE PUSH, not in a separate job that happens to
+# have passed earlier on the same commit. The image that is verified and the
+# image that is pushed are built from the same layers in the same run, so there
+# is no window in which they are different artefacts.
+#
+# ONE IMAGE, NOT ONE PER POSTGRESQL MAJOR. The image carries every major upstream
+# still supports and the agent chooses by reading the archive's own table of
+# contents. A tag per major would make the customer answer, at install time, the
+# question they installed this to have answered.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, semver, e.g. 1.0.0 — no leading v"
+        required: true
+      ref:
+        description: "Commit, branch or tag to build"
+        required: false
+        default: main
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  release:
+    name: Verify, then publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        # Refused here rather than in the registry. A published tag is a tag
+        # somebody has already pasted into a compose file: it cannot be taken
+        # back, only superseded, and `v1.0` would live in installation notes for
+        # as long as the software does.
+        run: |
+          set -eu
+          case "$VERSION" in
+            v*) echo "no leading v: the tag is $VERSION without it" >&2; exit 1 ;;
+          esac
+          printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+            || { echo "not semver: $VERSION" >&2; exit 1; }
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the verification image
+        env:
+          VERSION: ${{ inputs.version }}
+        # Loaded into the local daemon rather than pushed: this target carries a
+        # script that manufactures fixtures, and a product image must contain
+        # nothing that exists for our benefit rather than the customer's.
+        run: |
+          docker buildx build \
+            --target verify \
+            --build-arg SOURCE_VERSION="$VERSION" \
+            --tag proofdrill-agent:verify \
+            --load .
+
+      - name: Drill, with the flags that are the claim
+        # No Docker socket, no privileged mode, every capability dropped. If a
+        # release ever needs one of these removed, that is a product change and
+        # this is where it stops being publishable.
+        run: |
+          docker run --rm \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --memory=1g \
+            proofdrill-agent:verify
+
+      - name: Fetch from real storage and drill
+        run: bash dev/verify-s3.sh
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        env:
+          VERSION: ${{ inputs.version }}
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+        # TWO TAGS AND NO `latest`.
+        #
+        # X.Y.Z is immutable and is what an incident report can name. X moves,
+        # and it is what the installation page tells people to run, because a
+        # customer who pinned a patch version is a customer who stops getting
+        # security fixes silently.
+        #
+        # A MOVING TAG IS NOT AN AUTO-UPDATE, and the difference is the whole of
+        # promise 5 in the README. Docker never re-pulls on its own: a container
+        # started with `--restart unless-stopped` keeps running the image it has
+        # until a person pulls and restarts it. The tag moves; the customer's
+        # software does not, until they decide.
+        #
+        # `latest` is left out deliberately. It is the tag people use when they
+        # have not thought about versions, and this runs in their production
+        # network.
+        run: |
+          set -eu
+          MAJOR="${VERSION%%.*}"
+          docker buildx build \
+            --target agent \
+            --build-arg SOURCE_VERSION="$VERSION" \
+            --tag "$REGISTRY/agent:$VERSION" \
+            --tag "$REGISTRY/agent:$MAJOR" \
+            --push .
+
+      - name: Say what was published
+        env:
+          VERSION: ${{ inputs.version }}
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+        run: |
+          set -eu
+          MAJOR="${VERSION%%.*}"
+          {
+            printf '## Published `%s`\n\n' "$VERSION"
+            printf -- '- `%s/agent:%s`\n' "$REGISTRY" "$VERSION"
+            printf -- '- `%s/agent:%s`\n\n' "$REGISTRY" "$MAJOR"
+            printf 'Verified before the push: the full in-container drill with '
+            printf '`--cap-drop=ALL`, and a real fetch from MinIO.\n\n'
+            printf '**linux/amd64 only.** arm64 is not published, because nothing '
+            printf 'here has run a drill on it and an unverified image is not '
+            printf 'something to put inside a customer perimeter.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
