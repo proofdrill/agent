@@ -59,6 +59,15 @@ evaluated against `current_user`, so *"the application role cannot read another
 tenant's rows"* is only answered by becoming that role and trying. Asking the
 catalogue would prove the policy exists, not that it bites.
 
+**And `as` is only as real as the role behind it.** Roles are cluster-wide and a
+per-database artefact does not contain them, so unless this target also carries a
+`pg_dumpall --globals-only` artefact ([`GLOBALS.md`](GLOBALS.md)), the role you
+name here is an **empty placeholder** the agent created so the restore could
+finish — same name, no attributes, no memberships. The assertion still runs and
+still shows what the restored database's policies do to a role of that name, and
+every report that carries one says exactly that. With the globals, it is your
+role, and the answer is about your cluster.
+
 **`settings` is how you put a policy in front of a tenant that does not exist.**
 A policy reading `current_setting('app.tenant_id')` needs one to read; setting it
 to an id nobody owns and asserting that nothing is visible is the check this
@@ -88,7 +97,10 @@ question:
   refused by the server. No statement in a pack can run a program or read a file
   on the machine the agent is installed on.
 - **It is not a member** of `pg_execute_server_program`, `pg_read_server_files`
-  or `pg_write_server_files`, and it cannot grant itself anything.
+  or `pg_write_server_files`, and it cannot grant itself anything. Nor can it
+  become one: naming a role in `as` grants that role to it, and membership of
+  those three is **not applied** when your cluster globals are loaded, by name and
+  for this reason — [`GLOBALS.md`](GLOBALS.md) §3.
 - **The transaction is read only**, so a pack cannot leave the third assertion
   quietly depending on what the second one did to the data.
 - **The cluster has no TCP listener at all** and is deleted when the drill ends.
@@ -127,6 +139,11 @@ succeeds, with one exception: **a superuser is refused**, by name, and the
 assertion is reported as one that could not be evaluated. Becoming a superuser
 would hand a statement everything the list above takes away. Ask what a superuser
 can do from the catalogue instead — levels 2 and 3 already do.
+
+That refusal earns its keep once your globals are loaded, because then it is a
+finding rather than an obstacle: an assertion asking what `app_role` cannot read,
+answered with *`app_role` is a superuser in the cluster your backup came from*,
+has been answered. A superuser reads everything.
 
 ### There is no filter over your SQL, on purpose
 

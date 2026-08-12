@@ -97,6 +97,7 @@ Something to do:
     },
     "postgresMajor": 17,
     "rpoWindowHours": 24,
+    "globals": { "source": "separate", "pattern": "globals-*.sql" },
     "leaseExpiresAt": "2026-08-11T22:20:00Z",
     "assertions": {
       "assertions": [
@@ -173,6 +174,41 @@ are properties of *this* protocol:
 
 The field is absent when a target has no assertions, which is the normal case for
 a target somebody set up five minutes ago.
+
+### 3.3 `globals`, the one field the agent cannot work out for itself
+
+```json
+"globals": { "source": "separate", "pattern": "globals-*.sql" }
+```
+
+`source` is one of `unknown`, `included`, `separate`, `absent`, and `pattern` is
+null in every case but the third.
+
+Roles are cluster-wide. A per-database `pg_dump` carries the rows, the policies
+and `FORCE ROW LEVEL SECURITY`, and **it does not carry the roles those policies
+are written about** — so without a second artefact the agent restores a database
+whose objects belong to placeholder roles it invented, and the question level 3
+exists for cannot be asked at all. [`GLOBALS.md`](GLOBALS.md) is the whole of what
+happens to that file; three things belong here because they are properties of
+*this* protocol:
+
+- **It is data, not text to run.** Unlike `assertions`, this field names an object
+  in a bucket the agent already holds read-only credentials for. What comes back
+  is still read rather than executed, and `GLOBALS.md` §3 says exactly what
+  crosses that line.
+- **`unknown` is the honest default and travels like any other answer.** A team
+  that has never restored does not know where their roles are, which is the
+  premise of this product; the drill is what finds out. A control plane that
+  omitted the field rather than saying `unknown` would be asking the agent to
+  guess.
+- **An old agent ignores it**, like any unknown field, and its report says under
+  *not checked* that the role attributes were not tested. Nothing has to be
+  inferred from a version number.
+
+The pattern is matched against the same bucket and the same prefix as the backup.
+There is deliberately no second storage block: an artefact and the roles it needs
+that live in different buckets are two things nobody can keep in step, and the
+agent's credentials are scoped to one prefix on purpose.
 
 ## 4. Reporting against a job
 

@@ -3,12 +3,13 @@
 > **Status: early development. There is no release and no published image.**
 > `proofdrill drill` restores a `pg_dump -Fc` archive into a throwaway
 > PostgreSQL and runs the **level 1, 2 and 3** assertions against it —
-> **including your own SQL assertions** ([how to write
-> them](protocol/v1/ASSERTIONS.md)) — with measured RPO and RTO. It fetches from
-> S3-compatible storage, and `proofdrill run` takes work from a control plane and
-> reports back, signed. What is still missing — the role attributes that need a
-> `pg_dumpall --globals-only` artefact — is printed by every run under what it
-> did not check, rather than left to be assumed.
+> including the **role attributes** read from your
+> [`pg_dumpall --globals-only`](protocol/v1/GLOBALS.md) artefact, and **your own
+> SQL assertions** ([how to write them](protocol/v1/ASSERTIONS.md)) — with
+> measured RPO and RTO. It fetches from S3-compatible storage, and
+> `proofdrill run` takes work from a control plane and reports back, signed.
+> Whatever a run could not check is printed under its own heading every time,
+> rather than left to be assumed.
 
 Proofdrill proves that a database backup restores — and that the restored
 database still enforces the guarantees the original enforced.
@@ -48,9 +49,11 @@ checks; the third is the one that matters and that nobody else does:
    checked against the data it owns: one that came back at the beginning
    restores perfectly cleanly and fails your next insert.
 3. **Do the guarantees still hold?** Row-level security enabled *and forced*
-   where it was. Identical policies. The application role still cannot read
-   another tenant's rows. No role gained `BYPASSRLS`. Your own SQL assertions
-   still return true.
+   where it was. Identical policies. No role your policies name is exempt from
+   them — a role holding `BYPASSRLS` or `SUPERUSER` is read before any policy is,
+   and that check needs your
+   [cluster globals](protocol/v1/GLOBALS.md), because roles are not in a
+   per-database backup. Your own SQL assertions still return true.
 4. **The numbers you owe somebody.** Measured RPO from the age of the artefact,
    measured RTO from the real duration of the restore.
 
@@ -91,6 +94,20 @@ instead of the prose. The exit code is the contract: **0** passed, **1**
 attempted and the backup did not hold, **2** could not be attempted — which is a
 correction and not a verdict — **64** a bad command line, **70** the agent itself
 broke, which says nothing about your backup.
+
+Add `--globals-file globals.sql` and level 3 can answer the question it exists
+for. Roles are cluster-wide: a per-database backup carries your policies and not
+the roles they are written about, so without that second file the roles in the
+restored database are placeholders and *"the application role is exempt from
+every policy you wrote"* is invisible. One command produces it, and it does not
+need a superuser:
+
+```
+pg_dumpall --globals-only --no-role-passwords -h HOST -U USER > globals-$(date +%F).sql
+```
+
+[`protocol/v1/GLOBALS.md`](protocol/v1/GLOBALS.md) says exactly what the agent
+applies out of that file and what it refuses — the file is read, never executed.
 
 Against your own bucket, downloading nothing:
 
