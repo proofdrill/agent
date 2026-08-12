@@ -19,7 +19,7 @@ public class ProcessesTests
     public void A_child_process_does_not_inherit_the_token_or_the_storage_keys()
     {
         var info = new ProcessStartInfo("postgres");
-        info.Environment["PROOFDRILL_TOKEN"] = "rh_agt_secret";
+        info.Environment["PROOFDRILL_TOKEN"] = "pd_agt_secret";
         info.Environment["PROOFDRILL_S3_ACCESS_KEY_ID"] = "AKIAEXAMPLE";
         info.Environment["PROOFDRILL_S3_SECRET_ACCESS_KEY"] = "secret";
         info.Environment["PGHOST"] = "/work/cluster/socket";

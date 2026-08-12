@@ -22,7 +22,7 @@ namespace Proofdrill.Agent.Tests;
 public class JobAnswerTests
 {
     private const string AgentId = "0199a4c2-1111-7000-8000-000000000001";
-    private const string Token = "rh_agt_0123456789abcdef";
+    private const string Token = "pd_agt_0123456789abcdef";
 
     private static readonly Uri Origin = new("https://control.example");
 

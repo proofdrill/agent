@@ -73,7 +73,7 @@ public class CanonicalJsonTests
 
 public class SignatureTests
 {
-    private const string Token = "rh_agt_0123456789abcdef";
+    private const string Token = "pd_agt_0123456789abcdef";
 
     private static JsonObject Envelope() => ReportEnvelope.Build(Report(), new AgentIdentity("agent-1", "1.2.3", "box"));
 
@@ -145,7 +145,7 @@ public class SignatureTests
         var signature = envelope["agentSignature"]!["value"]!.GetValue<string>();
 
         Assert.True(Signatures.VerifyAgent(canonical, Token, signature));
-        Assert.False(Signatures.VerifyAgent(canonical, "rh_agt_somebody_elses_token", signature));
+        Assert.False(Signatures.VerifyAgent(canonical, "pd_agt_somebody_elses_token", signature));
     }
 
     [Fact]
@@ -256,7 +256,7 @@ public class SignatureTests
 /// </summary>
 public class ClaimTests
 {
-    private const string Token = "rh_agt_0123456789abcdef";
+    private const string Token = "pd_agt_0123456789abcdef";
     private const string AgentId = "0199a4c2-1111-7000-8000-000000000001";
 
     private static JsonObject Claim() => ClaimEnvelope.Build(

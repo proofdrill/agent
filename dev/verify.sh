@@ -717,7 +717,7 @@ done
 # ---------------------------------------------------------------------------
 say "6b. the protocol, judged by openssl and not by us"
 # ---------------------------------------------------------------------------
-export PROOFDRILL_TOKEN=rh_agt_verification_token
+export PROOFDRILL_TOKEN=pd_agt_verification_token
 proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 --envelope > /work/envelope.json
 expect "a drill produces a signed envelope" 0 "$?"
 
