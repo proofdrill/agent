@@ -1196,8 +1196,42 @@ internal static partial class DrillRunner
         _ => $"{value} B",
     };
 
-    public static string AgentVersion() =>
-        typeof(DrillRunner).Assembly.GetName().Version?.ToString() ?? "0.0.0";
+    /// <summary>
+    /// What this agent calls itself, on the wire and on the screen.
+    /// <para>
+    /// <c>AssemblyInformationalVersion</c> carries what the build was given —
+    /// <c>1.0.0</c> — while <c>GetName().Version</c> is the assembly version,
+    /// which MSBuild pads to four parts. The padded form reached the first
+    /// release: <c>proofdrill version</c> printed <c>1.0.0.0</c>, and that
+    /// string is not decoration. It is signed material inside the report and the
+    /// claim envelopes, and the field is documented in a protocol other people
+    /// implement against — where <c>JOBS.md</c> shows a three-part version. Two
+    /// shapes in one public field is a comparison somebody writes wrongly later,
+    /// and the "warn when an agent is too old" rule in <c>docs/03</c> §11.1 is
+    /// exactly that comparison, not yet written.
+    /// </para>
+    /// <para>
+    /// The <c>+commit</c> suffix is cut because the SDK appends one when the
+    /// build can see a git revision. Without cutting it, a build from a working
+    /// tree and a build from a Docker context — which copies no <c>.git</c> —
+    /// would report different versions for identical source.
+    /// </para>
+    /// </summary>
+    public static string AgentVersion()
+    {
+        var informational = typeof(DrillRunner).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+            .FirstOrDefault()?.InformationalVersion;
+
+        if (!string.IsNullOrWhiteSpace(informational))
+        {
+            var plus = informational.IndexOf('+', StringComparison.Ordinal);
+            return plus < 0 ? informational : informational[..plus];
+        }
+
+        return typeof(DrillRunner).Assembly.GetName().Version?.ToString() ?? "0.0.0";
+    }
 
     [GeneratedRegex(@"Dumped from database version:\s*(?<major>\d+)")]
     private static partial Regex DumpedFrom();
