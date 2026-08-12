@@ -154,6 +154,29 @@ A modified agent can therefore run as many drills as it likes and none of them
 will appear in an organisation's history, which is the only artefact that is ever
 handed to an enterprise customer.
 
+**The refusals, in full.** Each is a `409` whose body is an RFC 9457 problem
+document with a `code`, and each says what to do about it — because the person
+reading that line is looking at their own terminal, and "not allowed" would send
+them to support for something they can fix in a minute.
+
+| `code` | What happened |
+|---|---|
+| `report_not_requested` | The report answers no drill the control plane asked for. Drills are scheduled there and collected with `JOBS.md`'s claim; a report answering none of them is about no database, so nothing can bound it and nothing can compare it. |
+| `report_target_unknown` | The database it was about was removed while the drill was running. |
+| `report_beyond_plan` | The plan covers fewer databases than the organisation has configured — which happens after a downgrade. The plan covers the oldest; the answer carries `limit` and `currentUsage`. |
+| `report_too_soon` | This database was drilled more recently than the plan allows. The answer carries `minimumIntervalHours` and `nextAllowedAt`. |
+| `report_no_plan` | The organisation has no subscription to read a limit from. |
+
+A refused report **closes the drill it answered**, so the agent is not handed the
+same work again on its next poll. Nothing is stored: the drill happened on your
+hardware and its result did not enter the history, which is the whole meaning of
+"rejected rather than counted".
+
+One rule is deliberately **not** applied here. A subscription that has lapsed
+stops drills being *asked for* — nothing is queued — and does not refuse a report
+for a drill that was already asked for. Evidence that a restore failed is not
+withheld over a payment state.
+
 ## 8. The key list, and rotation
 
 ```
