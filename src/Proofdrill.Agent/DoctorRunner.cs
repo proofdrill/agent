@@ -24,10 +24,25 @@ internal static class DoctorRunner
         int? declaredMajor,
         double? rpoWindowHours,
         string workRoot,
+        string? assertionPack,
         CancellationToken cancellationToken)
     {
         var checks = new List<Check>();
         var notAttempted = new List<string>();
+
+        // First, and before the network: a pack with a typo in it is the cheapest
+        // thing here to be wrong about and the most expensive to discover later,
+        // because the drill that finds it has already restored the database.
+        if (assertionPack is { } path)
+        {
+            checks.Add(ReadPack(path));
+        }
+        else
+        {
+            notAttempted.Add(
+                "your own SQL assertions: none were named. Levels 1 to 3 run without them; what only you can ask " +
+                "— that a named role sees nothing without a tenant — needs a pack. See protocol/v1/ASSERTIONS.md.");
+        }
 
         var (accessKeyId, secretAccessKey) = ArtefactLocator.Credentials();
         checks.Add(new Check("credentials_present", Outcome.Passed,
@@ -136,6 +151,30 @@ internal static class DoctorRunner
             "carries the cluster roles, and whether it restores at all are all unknown until a drill runs.");
 
         return new DoctorReport(1, checks.All(check => check.Outcome != Outcome.Failed), checks, notAttempted);
+    }
+
+    /// <summary>
+    /// The pack, read and bounded but never run: the doctor has no database to
+    /// ask, and it says so rather than implying the assertions themselves have
+    /// been shown to hold.
+    /// </summary>
+    private static Check ReadPack(string path)
+    {
+        try
+        {
+            var pack = AssertionPack.Read(path);
+
+            return new Check("assertion_pack_readable", Outcome.Passed,
+                pack.IsEmpty
+                    ? $"'{Path.GetFileName(path)}' is a valid pack and carries no assertions"
+                    : $"{pack.Assertions.Count} assertion(s) in '{Path.GetFileName(path)}', each with a title and " +
+                      "a statement of a shape this agent will run. Whether they HOLD needs a restored database, " +
+                      "which the doctor does not make.");
+        }
+        catch (AssertionPackException exception)
+        {
+            return new Check("assertion_pack_readable", Outcome.Failed, exception.Message);
+        }
     }
 
     private static string Bytes(long value) => value switch

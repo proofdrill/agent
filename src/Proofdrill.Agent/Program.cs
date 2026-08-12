@@ -72,6 +72,15 @@ catch (UsageException exception)
     Help();
     return UsageError;
 }
+catch (AssertionPackException exception)
+{
+    // The command line was wrong, and the help is not printed after it: the
+    // message names the assertion and what is wrong with it, and a screen of
+    // usage under that would push it out of view. Refused before anything is
+    // downloaded, which is the point of checking the pack first.
+    await Console.Error.WriteLineAsync($"proofdrill: {exception.Message}").ConfigureAwait(false);
+    return UsageError;
+}
 catch (DrillCannotBeAttemptedException exception)
 {
     await Console.Error.WriteLineAsync($"proofdrill: the drill could not be attempted. {exception.Message}")
@@ -235,6 +244,7 @@ async Task<int> DoctorAsync(CommandLine command, CancellationToken cancellationT
         command.Integer("--pg-major"),
         command.Number("--rpo-window-hours"),
         command.Value("--work-dir") ?? DefaultWorkRoot(),
+        command.Value("--assertions"),
         cancellationToken).ConfigureAwait(false);
 
     if (command.Has("--json"))
@@ -316,6 +326,11 @@ async Task<int> DrillAsync(CommandLine command, CancellationToken cancellationTo
     // A local file or a bucket, and exactly one of them. Guessing between them
     // would mean silently drilling yesterday's download when today's fetch was
     // meant.
+    // Read and checked BEFORE the artefact is fetched. A typo in an assertion
+    // that surfaces after a hundred gigabytes have crossed somebody's network is
+    // the same defect as checking the disk halfway through a restore.
+    var pack = LocalAssertions(command);
+
     var artefactPath = command.Value("--dump-file") is { } local
         ? local
         : await FetchAsync(StorageFrom(command), workRoot, cancellationToken).ConfigureAwait(false);
@@ -325,7 +340,8 @@ async Task<int> DrillAsync(CommandLine command, CancellationToken cancellationTo
         PostgresMajor: command.Integer("--pg-major"),
         DryRun: command.Has("--dry-run"),
         WorkRoot: workRoot,
-        RpoWindowHours: command.Number("--rpo-window-hours"));
+        RpoWindowHours: command.Number("--rpo-window-hours"),
+        Assertions: pack);
 
     var report = await DrillRunner.RunAsync(options, cancellationToken).ConfigureAwait(false);
 
@@ -380,6 +396,11 @@ async Task<int> RunAsync(CommandLine command, CancellationToken cancellationToke
     var origin = new Uri(command.Required("--control-plane"));
     var pollSeconds = Math.Clamp(command.Integer("--poll-seconds") ?? 60, 5, 3600);
     var workRoot = command.Value("--work-dir") ?? DefaultWorkRoot();
+
+    // Read once, at startup, and not per job: a pack that is unreadable is a
+    // reason to refuse to start, not to discover at three in the morning on the
+    // first drill.
+    var localPack = LocalAssertions(command);
     var token = ReportEnvelope.Token();
     var agentId = RegisteredAgentId(command);
     var identity = new AgentIdentity(agentId, DrillRunner.AgentVersion(), Environment.MachineName);
@@ -415,7 +436,13 @@ async Task<int> RunAsync(CommandLine command, CancellationToken cancellationToke
 
         if (job is not null)
         {
-            await RunOneAsync(controlPlane, identity, job, workRoot, cancellationToken).ConfigureAwait(false);
+            await RunOneAsync(
+                controlPlane,
+                identity,
+                job,
+                Assertions(job, localPack, command.Has("--no-remote-assertions")),
+                workRoot,
+                cancellationToken).ConfigureAwait(false);
         }
         else if (command.Has("--once"))
         {
@@ -446,6 +473,7 @@ async Task RunOneAsync(
     ControlPlane controlPlane,
     AgentIdentity identity,
     AssignedJob job,
+    AssertionPack assertions,
     string workRoot,
     CancellationToken cancellationToken)
 {
@@ -464,7 +492,8 @@ async Task RunOneAsync(
                 PostgresMajor: job.PostgresMajor,
                 DryRun: false,
                 WorkRoot: workRoot,
-                RpoWindowHours: job.RpoWindowHours),
+                RpoWindowHours: job.RpoWindowHours,
+                Assertions: assertions),
             cancellationToken).ConfigureAwait(false);
     }
     catch (Exception exception) when (exception is DrillCannotBeAttemptedException or StorageException)
@@ -594,6 +623,60 @@ static void Level(string heading, IReadOnlyList<Check> checks)
     }
 }
 
+/// <summary>
+/// The assertion pack on this machine, if one was named. Read eagerly, so that a
+/// malformed file is a refusal to start rather than a surprise on the first job.
+/// </summary>
+static AssertionPack LocalAssertions(CommandLine command) =>
+    command.Value("--assertions") is { } path
+        ? AssertionPack.Read(path) with { Origin = $"a file on this machine ({Path.GetFileName(path)})" }
+        : AssertionPack.Empty;
+
+/// <summary>
+/// Which pack a job runs with, and the answer is a product decision rather than a
+/// precedence rule.
+/// <para>
+/// The control plane is where assertions are written, because that is where the
+/// history, the comparisons and the evidence pack live — an assertion whose
+/// verdict nobody can date is not evidence of anything. But it is also the one
+/// thing this agent is told that it then <b>executes</b>, so the customer keeps
+/// both switches: <c>--assertions</c> replaces what the control plane sent, and
+/// <c>--no-remote-assertions</c> refuses it outright and runs nothing.
+/// </para>
+/// <para>
+/// Both are recorded in the report rather than applied quietly. A drill whose
+/// assertions were silently swapped for another set, or silently skipped, would
+/// let somebody read a green history as proof of a check that never ran — and the
+/// history is the entire product.
+/// </para>
+/// </summary>
+static AssertionPack Assertions(AssignedJob job, AssertionPack local, bool refuseRemote)
+{
+    if (!local.IsEmpty)
+    {
+        return job.Assertions.IsEmpty
+            ? local
+            : local with
+            {
+                Origin = local.Origin +
+                    $", which replaced the {job.Assertions.Assertions.Count} the control plane sent",
+            };
+    }
+
+    if (job.Assertions.IsEmpty)
+    {
+        return AssertionPack.Empty;
+    }
+
+    return refuseRemote
+        ? AssertionPack.Empty with
+        {
+            Origin = $"the control plane sent {job.Assertions.Assertions.Count}, and this agent was started with " +
+                "--no-remote-assertions, so none of them were run",
+        }
+        : job.Assertions with { Origin = "the control plane, in a counter-signed job answer" };
+}
+
 static AgentIdentity Identity(CommandLine command) =>
     new(AgentId(command), DrillRunner.AgentVersion(), Environment.MachineName);
 
@@ -677,7 +760,8 @@ static void Help()
           proofdrill version
 
         doctor reaches the storage, finds the newest artefact, reads its age and
-        size, and checks the disk. It restores nothing and DOWNLOADS nothing.
+        size, checks the disk, and reads your assertion pack if you name one. It
+        restores nothing and DOWNLOADS nothing.
 
         run keeps asking your control plane for work and does what it is given.
         Everything is outbound: nothing listens on this machine, no port is
@@ -704,6 +788,8 @@ static void Help()
           --poll-seconds <n>          how often to ask (default 60)
           --once                      take at most one job, then exit
           --work-dir <path>           where the throwaway cluster lives (default /work)
+          --assertions <file>         run this pack instead of the one the job carries
+          --no-remote-assertions      run none of the assertions a job carries
 
         PROOFDRILL_TOKEN and PROOFDRILL_AGENT_ID come from the registration page,
         in the docker run line it shows once.
@@ -713,8 +799,27 @@ static void Help()
           --pg-major <n>              force a major; the default is the one the archive records
           --rpo-window-hours <n>      how old the backup is allowed to be, in hours
           --work-dir <path>           where the throwaway cluster lives (default /work)
+          --assertions <file>         your own SQL assertions, as a JSON pack
           --dry-run                   read the archive, restore nothing, and say what was skipped
           --json                      print the report as JSON instead of prose
+
+        your own assertions
+          An assertion is one SELECT that must return true, with a title somebody
+          who cannot read SQL will understand, and optionally a role to run it as:
+
+            { "assertions": [ {
+                "key":   "app_role_sees_no_other_tenant",
+                "title": "the application role cannot read another tenant's rows",
+                "sql":   "SELECT count(*) = 0 FROM public.orders",
+                "as":    "app_role",
+                "settings": { "app.tenant_id": "00000000-0000-0000-0000-000000000000" }
+            } ] }
+
+          They run as a role created for the purpose: not a superuser, unable to
+          run a program or read a file, in a read only transaction, against the
+          throwaway cluster. The pack's shape is checked before anything is
+          downloaded — `proofdrill doctor --assertions <file>` checks it and
+          restores nothing. The format is protocol/v1/ASSERTIONS.md.
 
         storage options, for doctor and for a drill without --dump-file
           --s3-endpoint <url>         https://s3.eu-central-1.amazonaws.com, or your own
@@ -736,8 +841,8 @@ static void Help()
           64  the command line was wrong
           70  the agent itself broke, which says nothing about the backup
 
-        This build restores and runs levels 1, 2 and 3. What is still missing —
-        your own SQL assertions, and the role attributes that need a
+        This build restores and runs levels 1, 2 and 3, including your own SQL
+        assertions. What is still missing — the role attributes that need a
         pg_dumpall --globals-only artefact — is printed by every run under what
         it did not check, rather than left to be assumed.
 

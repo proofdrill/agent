@@ -12,7 +12,8 @@ internal sealed record AssignedJob(
     string TargetName,
     StorageOptions Storage,
     int? PostgresMajor,
-    double? RpoWindowHours);
+    double? RpoWindowHours,
+    AssertionPack Assertions);
 
 /// <summary>
 /// The only conversation this agent has with anything of ours, and it is entirely
@@ -91,7 +92,44 @@ internal sealed class ControlPlane(
                 // hand-typed run must address the same bucket the same way.
                 PathStyle: !endpoint.Host.EndsWith("amazonaws.com", StringComparison.OrdinalIgnoreCase)),
             PostgresMajor: (int?)job["postgresMajor"]?.GetValue<int>(),
-            RpoWindowHours: (double?)job["rpoWindowHours"]?.GetValue<int>());
+            RpoWindowHours: (double?)job["rpoWindowHours"]?.GetValue<int>(),
+            Assertions: Assertions(job));
+    }
+
+    /// <summary>
+    /// The customer's own assertions, as the job carried them.
+    /// <para>
+    /// This is the one field in the protocol that is <b>text this agent
+    /// executes</b>, so it is worth being exact about what has already happened
+    /// by the time it is read: the answer's counter-signature was checked against
+    /// the control plane's published key, so a pack that was altered in transit,
+    /// or that came from something which is not this customer's control plane, is
+    /// refused before this line runs. What it can then do is bounded by the role
+    /// it runs as — <see cref="AssertionRunner"/> — and not by anything read
+    /// here.
+    /// </para>
+    /// <para>
+    /// A job whose pack does not parse is refused as a whole. Dropping the
+    /// unreadable half and drilling anyway would produce a green report for a
+    /// target whose owner believes their own assertions are being run.
+    /// </para>
+    /// </summary>
+    private static AssertionPack Assertions(JsonObject job)
+    {
+        if (job["assertions"] is not JsonNode node)
+        {
+            return AssertionPack.Empty;
+        }
+
+        try
+        {
+            return AssertionPack.From(node);
+        }
+        catch (AssertionPackException exception)
+        {
+            throw new StorageException(
+                $"the control plane sent an assertion pack this agent cannot read: {exception.Message}");
+        }
     }
 
     /// <summary>

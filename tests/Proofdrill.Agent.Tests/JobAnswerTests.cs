@@ -258,6 +258,95 @@ public class JobAnswerTests
         Assert.Equal(2, stub.KeyRequests);
     }
 
+    /// <summary>
+    /// The assertion pack is the one field in this protocol that is text the agent
+    /// will execute, so the property that matters is not that it arrives — it is
+    /// that it cannot arrive altered. Changing a single character of the SQL after
+    /// the control plane signed the answer breaks the counter-signature, and the
+    /// agent refuses the job rather than running the edited statement.
+    /// </summary>
+    [Fact]
+    public async Task An_assertion_edited_after_the_control_plane_signed_it_is_refused()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+
+        var job = Job();
+        job["assertions"] = Pack("SELECT count(*) = 0 FROM public.tenant_rows");
+
+        var answer = (JsonObject)JsonNode.Parse(Answer(key, "key-2026", job))!;
+        answer["job"]!["assertions"]!["assertions"]![0]!["sql"] = "SELECT true";
+
+        var refusal = await Assert.ThrowsAsync<StorageException>(() => ClaimAsync(new Stub
+        {
+            Claim = () => answer.ToJsonString(),
+            Keys = () => KeyList(("key-2026", key)),
+        }));
+
+        Assert.Contains("does not verify", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_signed_job_carries_its_assertions_through()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+
+        var job = Job();
+        job["assertions"] = Pack("SELECT count(*) = 0 FROM public.tenant_rows");
+
+        var (claimed, _) = await ClaimAsync(new Stub
+        {
+            Claim = () => Answer(key, "key-2026", job),
+            Keys = () => KeyList(("key-2026", key)),
+        });
+
+        Assert.NotNull(claimed);
+        var assertion = Assert.Single(claimed.Assertions.Assertions);
+        Assert.Equal("app_role_sees_no_other_tenant", assertion.Key);
+        Assert.Equal("app_role", assertion.Role);
+    }
+
+    /// <summary>
+    /// A job whose pack does not parse is refused as a whole, and the refusal
+    /// names it. Drilling the target anyway and dropping the unreadable half would
+    /// put a green report in a history whose owner believes their own assertions
+    /// are being run.
+    /// </summary>
+    [Fact]
+    public async Task A_job_carrying_a_pack_this_agent_cannot_read_is_refused()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+
+        var job = Job();
+        job["assertions"] = new JsonObject
+        {
+            ["assertions"] = new JsonArray(new JsonObject
+            {
+                ["key"] = "no_title_here",
+                ["sql"] = "SELECT true",
+            }),
+        };
+
+        var refusal = await Assert.ThrowsAsync<StorageException>(() => ClaimAsync(new Stub
+        {
+            Claim = () => Answer(key, "key-2026", job),
+            Keys = () => KeyList(("key-2026", key)),
+        }));
+
+        Assert.Contains("assertion pack this agent cannot read", refusal.Message, StringComparison.Ordinal);
+    }
+
+    private static JsonObject Pack(string sql) => new()
+    {
+        ["assertions"] = new JsonArray(new JsonObject
+        {
+            ["key"] = "app_role_sees_no_other_tenant",
+            ["title"] = "the application role cannot read another tenant's rows",
+            ["sql"] = sql,
+            ["as"] = "app_role",
+            ["settings"] = new JsonObject { ["app.tenant_id"] = "00000000-0000-0000-0000-000000000000" },
+        }),
+    };
+
     [Fact]
     public void The_signed_bytes_are_the_answer_with_only_the_signature_value_removed()
     {

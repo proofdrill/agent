@@ -17,7 +17,7 @@ internal sealed class CommandLine
     private static readonly HashSet<string> KnownFlags = new(StringComparer.Ordinal)
     {
         "--dry-run", "--json", "--help", "--s3-path-style", "--s3-virtual-host",
-        "--envelope", "--canonical-only", "--agent", "--once",
+        "--envelope", "--canonical-only", "--agent", "--once", "--no-remote-assertions",
     };
 
     private static readonly HashSet<string> KnownValues = new(StringComparer.Ordinal)
@@ -25,7 +25,7 @@ internal sealed class CommandLine
         "--dump-file", "--pg-major", "--rpo-window-hours", "--work-dir",
         "--s3-endpoint", "--s3-bucket", "--s3-prefix", "--s3-pattern", "--s3-region",
         "--report-to", "--agent-id", "--report", "--public-key",
-        "--control-plane", "--poll-seconds",
+        "--control-plane", "--poll-seconds", "--assertions",
     };
 
     /// <summary>
