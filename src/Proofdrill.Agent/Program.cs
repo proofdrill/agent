@@ -245,6 +245,7 @@ async Task<int> DoctorAsync(CommandLine command, CancellationToken cancellationT
         command.Number("--rpo-window-hours"),
         command.Value("--work-dir") ?? DefaultWorkRoot(),
         command.Value("--assertions"),
+        command.Value("--s3-globals-pattern"),
         cancellationToken).ConfigureAwait(false);
 
     if (command.Has("--json"))
@@ -296,7 +297,15 @@ StorageOptions StorageFrom(CommandLine command)
         PathStyle: command.Has("--s3-path-style") || (!amazon && !command.Has("--s3-virtual-host")));
 }
 
-async Task<string> FetchAsync(StorageOptions storage, string workRoot, CancellationToken cancellationToken)
+// Both artefacts come out of one listing, deliberately. They are a pair — the
+// backup and the roles the backup's objects belong to — and reading the bucket
+// twice would let the two halves come from either side of a nightly job that
+// wrote them.
+async Task<(string Artefact, GlobalsArtefact? Globals, string? Note)> FetchAsync(
+    StorageOptions storage,
+    string? globalsPattern,
+    string workRoot,
+    CancellationToken cancellationToken)
 {
     var (accessKeyId, secretAccessKey) = ArtefactLocator.Credentials();
 
@@ -316,7 +325,63 @@ async Task<string> FetchAsync(StorageOptions storage, string workRoot, Cancellat
     Console.Error.WriteLine($"proofdrill: fetching {artefact.Key} ({artefact.SizeBytes} bytes)");
     await client.GetAsync(artefact, destination, artefact.SizeBytes * 3, cancellationToken).ConfigureAwait(false);
 
-    return destination;
+    if (globalsPattern is not { Length: > 0 })
+    {
+        return (destination, null, null);
+    }
+
+    var globals = ArtefactLocator.Newest(listed, globalsPattern);
+    if (globals is null)
+    {
+        return (destination, null,
+            $"Nothing under '{storage.Prefix}' in '{storage.Bucket}' matches the globals pattern " +
+            $"'{globalsPattern}' this drill was given, so there was no second artefact to read the roles from.");
+    }
+
+    // A globals artefact is a few kilobytes of CREATE ROLE. A pattern that has
+    // matched something enormous has matched the wrong object, and the answer is
+    // to say so rather than to spend somebody's egress finding out.
+    const long GlobalsCeiling = 16L << 20;
+    if (globals.SizeBytes > GlobalsCeiling)
+    {
+        return (destination, null,
+            $"'{globals.Key}' matches the globals pattern '{globalsPattern}' and is {globals.SizeBytes} bytes. A " +
+            "pg_dumpall --globals-only artefact is a few kilobytes of CREATE ROLE statements, so this was left " +
+            "where it is rather than downloaded: the pattern is matching something else in the bucket.");
+    }
+
+    var globalsPath = Path.Combine(workRoot, "globals.sql");
+    Console.Error.WriteLine($"proofdrill: fetching {globals.Key} ({globals.SizeBytes} bytes)");
+    await client.GetAsync(globals, globalsPath, GlobalsCeiling, cancellationToken).ConfigureAwait(false);
+
+    return (destination, new GlobalsArtefact(
+        globalsPath, Name(globals.Key), globals.SizeBytes, globals.LastModified), null);
+}
+
+/// <summary>The file name of a stored object, which is what a report names.</summary>
+static string Name(string key) => key[(key.LastIndexOf('/') + 1)..];
+
+/// <summary>
+/// A globals artefact already on this machine, as <c>--globals-file</c> names it.
+/// The failure is a usage error rather than a correction: somebody who typed a
+/// path meant that path, and drilling without it would answer a different
+/// question from the one they asked.
+/// </summary>
+static GlobalsArtefact? LocalGlobals(CommandLine command)
+{
+    if (command.Value("--globals-file") is not { } path)
+    {
+        return null;
+    }
+
+    var file = new FileInfo(path);
+    if (!file.Exists)
+    {
+        throw new UsageException($"there is no globals artefact at '{path}'");
+    }
+
+    return new GlobalsArtefact(
+        file.FullName, file.Name, file.Length, new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero));
 }
 
 async Task<int> DrillAsync(CommandLine command, CancellationToken cancellationToken)
@@ -330,10 +395,30 @@ async Task<int> DrillAsync(CommandLine command, CancellationToken cancellationTo
     // that surfaces after a hundred gigabytes have crossed somebody's network is
     // the same defect as checking the disk halfway through a restore.
     var pack = LocalAssertions(command);
+    var localGlobals = LocalGlobals(command);
 
-    var artefactPath = command.Value("--dump-file") is { } local
-        ? local
-        : await FetchAsync(StorageFrom(command), workRoot, cancellationToken).ConfigureAwait(false);
+    string artefactPath;
+    GlobalsArtefact? globals;
+    string? note;
+
+    if (command.Value("--dump-file") is { } local)
+    {
+        (artefactPath, globals, note) = (local, localGlobals, null);
+    }
+    else
+    {
+        // --globals-file wins over a pattern, like --assertions wins over the pack
+        // a job carries: a file somebody named by hand is not overridden by
+        // something found in a bucket.
+        var fetched = await FetchAsync(
+                StorageFrom(command),
+                localGlobals is null ? command.Value("--s3-globals-pattern") : null,
+                workRoot,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        (artefactPath, globals, note) = (fetched.Artefact, localGlobals ?? fetched.Globals, fetched.Note);
+    }
 
     var options = new DrillOptions(
         ArtefactPath: artefactPath,
@@ -341,7 +426,11 @@ async Task<int> DrillAsync(CommandLine command, CancellationToken cancellationTo
         DryRun: command.Has("--dry-run"),
         WorkRoot: workRoot,
         RpoWindowHours: command.Number("--rpo-window-hours"),
-        Assertions: pack);
+        Assertions: pack,
+        Globals: globals,
+        GlobalsNote: note ??
+            "Give this drill the pg_dumpall --globals-only artefact — --globals-file <path>, or " +
+            "--s3-globals-pattern <glob> beside the backup — and it becomes testable.");
 
     var report = await DrillRunner.RunAsync(options, cancellationToken).ConfigureAwait(false);
 
@@ -484,16 +573,27 @@ async Task RunOneAsync(
 
     try
     {
-        var artefact = await FetchAsync(job.Storage, workRoot, cancellationToken).ConfigureAwait(false);
+        // Only when the target says the globals are a second object. The other
+        // three answers name no pattern, so nothing is looked for and the report
+        // says which answer it was — a listing performed on a hunch would be a
+        // request against somebody's bucket that nobody asked for.
+        var fetched = await FetchAsync(
+                job.Storage,
+                job.Globals.Source == "separate" ? job.Globals.Pattern : null,
+                workRoot,
+                cancellationToken)
+            .ConfigureAwait(false);
 
         report = await DrillRunner.RunAsync(
             new DrillOptions(
-                ArtefactPath: artefact,
+                ArtefactPath: fetched.Artefact,
                 PostgresMajor: job.PostgresMajor,
                 DryRun: false,
                 WorkRoot: workRoot,
                 RpoWindowHours: job.RpoWindowHours,
-                Assertions: assertions),
+                Assertions: assertions,
+                Globals: fetched.Globals,
+                GlobalsNote: fetched.Note ?? GlobalsNote(job.Globals)),
             cancellationToken).ConfigureAwait(false);
     }
     catch (Exception exception) when (exception is DrillCannotBeAttemptedException or StorageException)
@@ -521,6 +621,34 @@ async Task RunOneAsync(
         Console.Error.WriteLine($"proofdrill: {exception.Message}");
     }
 }
+
+/// <summary>
+/// What the report says about the roles when there is no globals artefact to
+/// apply, which is one of four different situations and never a single sentence.
+/// <para>
+/// It is reached only when the restore had to invent a role, so <c>included</c>
+/// and <c>separate</c> here are answers the drill has just disproved — a
+/// per-database archive never carries a role, whatever a target says about it.
+/// Saying that plainly is worth more than a neutral line, because the person who
+/// answered that question was guessing, which is the premise of this product.
+/// </para>
+/// </summary>
+static string GlobalsNote(JobGlobals globals) => globals.Source switch
+{
+    "absent" => "This target says its backups carry no cluster globals at all, so there is nothing to test the " +
+        "roles from. Adding a pg_dumpall --globals-only artefact beside the backup is what makes it testable.",
+
+    "included" => "This target says the backup artefact carries the cluster globals itself, and it does not: the " +
+        "roles above had to be invented for the restore to finish. A per-database pg_dump never carries roles — " +
+        "they are cluster-wide and live in pg_dumpall --globals-only.",
+
+    "separate" => "This target says its cluster globals are in a second artefact and names no pattern to find it " +
+        "by, so nothing was looked for.",
+
+    _ => "Nobody has said yet whether this target's backups include the cluster globals. This drill has just " +
+        "established that they do not: add the pg_dumpall --globals-only artefact to this target and the role " +
+        "questions become testable.",
+};
 
 /// <summary>
 /// A report for a drill that never got as far as restoring anything. Every field
@@ -796,12 +924,27 @@ static void Help()
 
         drill options
           --dump-file <path>          a custom-format archive, as written by pg_dump -Fc
+          --globals-file <path>       the cluster roles, as written by pg_dumpall --globals-only
           --pg-major <n>              force a major; the default is the one the archive records
           --rpo-window-hours <n>      how old the backup is allowed to be, in hours
           --work-dir <path>           where the throwaway cluster lives (default /work)
           --assertions <file>         your own SQL assertions, as a JSON pack
           --dry-run                   read the archive, restore nothing, and say what was skipped
           --json                      print the report as JSON instead of prose
+
+        the second artefact, and why there is one
+          Roles are cluster-wide. A per-database pg_dump carries the rows, the
+          policies and FORCE ROW LEVEL SECURITY, and it does not carry the roles
+          those policies are written about — so without pg_dumpall --globals-only
+          beside it, a drill cannot tell you whether the role your policy names
+          holds BYPASSRLS and is exempt from every one of them.
+
+          Give it one with --globals-file, or name the object beside the backup
+          with --s3-globals-pattern, and level 3 answers that question. The file
+          is read and never executed: the roles, their attributes and their
+          memberships are applied, and tablespaces, per-role parameters and
+          password verifiers are not. protocol/v1/GLOBALS.md says exactly what
+          crosses that line and why.
 
         your own assertions
           An assertion is one SELECT that must return true, with a title somebody
@@ -826,6 +969,7 @@ static void Help()
           --s3-bucket <name>
           --s3-prefix <path>          where the backups live inside the bucket
           --s3-pattern <glob>         which files are backups, e.g. "db-*.dump" (default *)
+          --s3-globals-pattern <glob> which file holds the roles, e.g. "globals-*.sql"
           --s3-region <name>          default us-east-1
           --s3-path-style             force bucket-in-the-path addressing
           --s3-virtual-host           force bucket-in-the-hostname addressing
@@ -841,10 +985,10 @@ static void Help()
           64  the command line was wrong
           70  the agent itself broke, which says nothing about the backup
 
-        This build restores and runs levels 1, 2 and 3, including your own SQL
-        assertions. What is still missing — the role attributes that need a
-        pg_dumpall --globals-only artefact — is printed by every run under what
-        it did not check, rather than left to be assumed.
+        This build restores and runs levels 1, 2 and 3 — the guarantees derived
+        from your artefact, the role attributes derived from your cluster
+        globals, and your own SQL assertions. Whatever a run could NOT check is
+        printed under its own heading every time, rather than left to be assumed.
 
         """);
 }

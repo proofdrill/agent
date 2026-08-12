@@ -25,6 +25,7 @@ internal static class DoctorRunner
         double? rpoWindowHours,
         string workRoot,
         string? assertionPack,
+        string? globalsPattern,
         CancellationToken cancellationToken)
     {
         var checks = new List<Check>();
@@ -102,6 +103,34 @@ internal static class DoctorRunner
             : new Check("key_can_read_the_artefact", Outcome.Failed,
                 $"'{artefact.Key}' is listed and cannot be read. The key may enumerate this bucket and not fetch " +
                 "from it, which no drill can work around."));
+
+        // The second artefact, found in the same listing and never downloaded —
+        // the doctor's whole value is that it pulls nothing. Whether the file is
+        // a globals artefact or something else that matched the pattern is a
+        // question only the drill can answer, and this says so rather than
+        // implying it checked.
+        if (globalsPattern is { Length: > 0 })
+        {
+            var globals = ArtefactLocator.Newest(listed, globalsPattern);
+
+            checks.Add(globals is not null
+                ? new Check("globals_artefact_found", Outcome.Passed,
+                    $"{globals.Key}, {Bytes(globals.SizeBytes)}, written " +
+                    $"{(DateTimeOffset.UtcNow - globals.LastModified).TotalHours:0.0} h ago. What is inside it is " +
+                    "unknown until a drill reads it.")
+                : new Check("globals_artefact_found", Outcome.Failed,
+                    $"{listed.Count} object(s) are under '{storage.Prefix}' and none matches the globals pattern " +
+                    $"'{globalsPattern}'. This says nothing about the backup itself — it means the roles, and " +
+                    "therefore level 3's question about which of them is exempt from your own policies, cannot be " +
+                    "checked. The pattern is wrong, or the pg_dumpall --globals-only artefact is not being written."));
+        }
+        else
+        {
+            notAttempted.Add(
+                "the cluster globals: no globals pattern was given, so nothing was looked for. Roles are " +
+                "cluster-wide and a per-database pg_dump does not carry them; without a second artefact a drill " +
+                "cannot say which role is exempt from the policies you wrote. See protocol/v1/GLOBALS.md.");
+        }
 
         if (rpoWindowHours is { } window)
         {

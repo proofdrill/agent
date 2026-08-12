@@ -23,6 +23,7 @@ internal sealed class CommandLine
     private static readonly HashSet<string> KnownValues = new(StringComparer.Ordinal)
     {
         "--dump-file", "--pg-major", "--rpo-window-hours", "--work-dir",
+        "--globals-file", "--s3-globals-pattern",
         "--s3-endpoint", "--s3-bucket", "--s3-prefix", "--s3-pattern", "--s3-region",
         "--report-to", "--agent-id", "--report", "--public-key",
         "--control-plane", "--poll-seconds", "--assertions",

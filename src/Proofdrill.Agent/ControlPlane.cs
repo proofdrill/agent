@@ -6,6 +6,17 @@ using Proofdrill.Agent.Storage;
 
 namespace Proofdrill.Agent;
 
+/// <summary>
+/// Where this target's cluster globals are, as the customer answered the question
+/// — <c>protocol/v1/JOBS.md</c> §3.3. <c>unknown</c> is the honest default and the
+/// reason the field exists: a team that has never restored does not know, and the
+/// drill is what finds out.
+/// </summary>
+internal sealed record JobGlobals(string Source, string? Pattern)
+{
+    public static JobGlobals Unknown { get; } = new("unknown", null);
+}
+
 /// <summary>One drill, as the control plane handed it over.</summary>
 internal sealed record AssignedJob(
     string Id,
@@ -13,7 +24,8 @@ internal sealed record AssignedJob(
     StorageOptions Storage,
     int? PostgresMajor,
     double? RpoWindowHours,
-    AssertionPack Assertions);
+    AssertionPack Assertions,
+    JobGlobals Globals);
 
 /// <summary>
 /// The only conversation this agent has with anything of ours, and it is entirely
@@ -93,7 +105,16 @@ internal sealed class ControlPlane(
                 PathStyle: !endpoint.Host.EndsWith("amazonaws.com", StringComparison.OrdinalIgnoreCase)),
             PostgresMajor: (int?)job["postgresMajor"]?.GetValue<int>(),
             RpoWindowHours: (double?)job["rpoWindowHours"]?.GetValue<int>(),
-            Assertions: Assertions(job));
+            Assertions: Assertions(job),
+
+            // Absent in an answer from a control plane older than this field, and
+            // read as "nobody has said" — which is what it means. The agent then
+            // does what it did before there was a field at all.
+            Globals: job["globals"] is JsonObject globals
+                ? new JobGlobals(
+                    globals["source"]?.GetValue<string>() ?? "unknown",
+                    globals["pattern"]?.GetValue<string>())
+                : JobGlobals.Unknown);
     }
 
     /// <summary>
