@@ -513,6 +513,7 @@ static DrillReport CouldNotAttemptReport(AssignedJob job, DateTimeOffset started
         DumpedFromMajor: null),
     Measurements: new Measurements(null, null),
     Level1: [new Check("artefact_present", Outcome.CouldNotAttempt, reason)],
+    Level2: [],
     Level3: [],
     RowCounts: new Dictionary<string, long>(),
     Observations:
@@ -538,25 +539,10 @@ void Print(DrillReport report)
         ? $"  measured RTO   {rto:0.0} s  (real time to restore it)"
         : "  measured RTO   not measured");
     Console.WriteLine($"  PostgreSQL     {report.PostgresMajor}");
-    Console.WriteLine();
 
-    Console.WriteLine("  level 1 — did the restore happen?");
-    foreach (var check in report.Level1)
-    {
-        Console.WriteLine($"  [{Mark(check.Outcome)}] {check.Key}");
-        Console.WriteLine($"      {check.Detail}");
-    }
-
-    if (report.Level3.Count > 0)
-    {
-        Console.WriteLine();
-        Console.WriteLine("  level 3 — do the guarantees still hold?");
-        foreach (var check in report.Level3)
-        {
-            Console.WriteLine($"  [{Mark(check.Outcome)}] {check.Key}");
-            Console.WriteLine($"      {check.Detail}");
-        }
-    }
+    Level("level 1 — did the restore happen?", report.Level1);
+    Level("level 2 — is it still that database?", report.Level2);
+    Level("level 3 — do the guarantees still hold?", report.Level3);
 
     if (report.RowCounts.Count > 0)
     {
@@ -590,6 +576,24 @@ void Print(DrillReport report)
     Console.WriteLine();
 }
 
+// One level, and nothing at all when it has no assertions: a heading printed over
+// an empty list reads as a level that passed.
+static void Level(string heading, IReadOnlyList<Check> checks)
+{
+    if (checks.Count == 0)
+    {
+        return;
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"  {heading}");
+    foreach (var check in checks)
+    {
+        Console.WriteLine($"  [{Mark(check.Outcome)}] {check.Key}");
+        Console.WriteLine($"      {check.Detail}");
+    }
+}
+
 static AgentIdentity Identity(CommandLine command) =>
     new(AgentId(command), DrillRunner.AgentVersion(), Environment.MachineName);
 
@@ -621,7 +625,11 @@ static string RegisteredAgentId(CommandLine command) =>
 async Task PostAsync(System.Text.Json.Nodes.JsonObject envelope, string endpoint, CancellationToken cancellationToken)
 {
     using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
-    using var body = new StringContent(envelope.ToJsonString(), System.Text.Encoding.UTF8, "application/json");
+    // The same shape that is printed. The control plane stores this text
+    // verbatim and an evidence pack hands it to an auditor years later, so what
+    // goes on the wire is what somebody eventually reads.
+    using var body = new StringContent(
+        envelope.ToJsonString(ReportJson.Format), System.Text.Encoding.UTF8, "application/json");
     using var response = await http.PostAsync(new Uri(endpoint), body, cancellationToken).ConfigureAwait(false);
 
     var answer = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -728,8 +736,10 @@ static void Help()
           64  the command line was wrong
           70  the agent itself broke, which says nothing about the backup
 
-        This build restores and runs level 1. Levels 2 and 3 are not implemented,
-        and every run says so rather than leaving it to be assumed.
+        This build restores and runs levels 1, 2 and 3. What is still missing —
+        your own SQL assertions, and the role attributes that need a
+        pg_dumpall --globals-only artefact — is printed by every run under what
+        it did not check, rather than left to be assumed.
 
         """);
 }

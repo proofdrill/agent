@@ -29,6 +29,11 @@ internal static class ReportEnvelope
             checks.Add(Check(1, check));
         }
 
+        foreach (var check in report.Level2)
+        {
+            checks.Add(Check(2, check));
+        }
+
         foreach (var check in report.Level3)
         {
             checks.Add(Check(3, check));

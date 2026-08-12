@@ -58,8 +58,16 @@ internal sealed class ThrowawayCluster : IAsyncDisposable
     /// its defaults, because a restore timed with fsync off produces a recovery
     /// time faster than the real one — and on a number a customer owes to a third
     /// party, optimistic is the worst direction to be wrong in.
+    /// <para>
+    /// The <paramref name="encoding"/> is the artefact's own, not ours. Restoring
+    /// a LATIN1 archive into a UTF8 cluster works — the server converts on the
+    /// way in — and produces a database whose every text column has been through
+    /// a conversion the original never had. Level 2 asks whether this is still
+    /// that database, so the answer must not be "no, because of a default we
+    /// chose".
+    /// </para>
     /// </summary>
-    public async Task CreateAsync(CancellationToken cancellationToken)
+    public async Task CreateAsync(string encoding, CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(DataDirectory);
         Directory.CreateDirectory(SocketDirectory);
@@ -70,7 +78,11 @@ internal sealed class ThrowawayCluster : IAsyncDisposable
                 "--pgdata", DataDirectory,
                 "--username", SuperUser,
                 "--auth", "trust",
-                "--encoding", "UTF8",
+                "--encoding", encoding,
+                // The locale is ours and cannot be otherwise: a per-database
+                // archive does not record the original's collation. Every report
+                // says so under what it did not check, because index ordering
+                // over text follows C rules here whatever production used.
                 "--locale", "C",
                 "--no-sync",
             ],

@@ -83,6 +83,7 @@ public class SignatureTests
         new ArtefactFacts("db.dump", 1234, new DateTimeOffset(2026, 8, 11, 3, 0, 0, TimeSpan.Zero), 6.24, 17),
         new Measurements(6.24, 1.581),
         [new Check("restore_exit_code", Outcome.Passed, "pg_restore exited 0")],
+        [new Check("foreign_keys_identical", Outcome.Passed, "all 1 foreign key(s) identical")],
         [new Check("policies_identical", Outcome.Passed, "all 1 policy(s) identical")],
         new Dictionary<string, long>(StringComparer.Ordinal) { ["public.t"] = 20000 },
         ["an observation"],
@@ -98,6 +99,25 @@ public class SignatureTests
 
         Assert.Contains("\"measuredRpoSeconds\":22464", canonical, StringComparison.Ordinal);
         Assert.Contains("\"measuredRtoMilliseconds\":1581", canonical, StringComparison.Ordinal);
+    }
+
+    // The level travels on the check itself and is never implied by position.
+    // The control plane groups a report by it, nothing auto-updates, and an
+    // agent installed today will still be sending version 1 in two years.
+    [Fact]
+    public void Each_check_carries_the_level_it_belongs_to()
+    {
+        var canonical = Encoding.UTF8.GetString(ReportEnvelope.AgentSignedBytes(Envelope()));
+
+        Assert.Contains("""
+            "key":"restore_exit_code","level":1
+            """, canonical, StringComparison.Ordinal);
+        Assert.Contains("""
+            "key":"foreign_keys_identical","level":2
+            """, canonical, StringComparison.Ordinal);
+        Assert.Contains("""
+            "key":"policies_identical","level":3
+            """, canonical, StringComparison.Ordinal);
     }
 
     [Fact]

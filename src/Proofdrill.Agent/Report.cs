@@ -41,6 +41,7 @@ internal sealed record DrillReport(
     ArtefactFacts Artefact,
     Measurements Measurements,
     IReadOnlyList<Check> Level1,
+    IReadOnlyList<Check> Level2,
     IReadOnlyList<Check> Level3,
     IReadOnlyDictionary<string, long> RowCounts,
     IReadOnlyList<string> Observations,
@@ -64,5 +65,12 @@ internal static class ReportJson
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.Never,
+        // The same encoder the canonical form uses, and for a related reason.
+        // These sentences are read by a person — an auditor opening the envelope
+        // out of an evidence pack, or somebody running a drill by hand — and the
+        // default encoder writes an apostrophe as ' and an em dash as
+        // —. The one document this product exists to hand over should not
+        // have to be decoded before it can be read.
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 }

@@ -6,7 +6,8 @@ namespace Proofdrill.Agent;
 internal sealed record ArtefactContents(
     IReadOnlyList<string> Tables,
     IReadOnlyList<string> ReferencedRoles,
-    GuaranteeSet Declared);
+    GuaranteeSet Declared,
+    SchemaSet Shape);
 
 /// <summary>
 /// Reads a custom-format archive without restoring it — which is what
@@ -45,7 +46,8 @@ internal static partial class ArtefactInspector
         return new ArtefactContents(
             ParseTables(toc.StandardOutput),
             ParseReferencedRoles(toc.StandardOutput, ddl.StandardOutput),
-            SecurityDdl.Extract(ddl.StandardOutput));
+            SecurityDdl.Extract(ddl.StandardOutput),
+            SchemaDdl.Extract(ddl.StandardOutput));
     }
 
     /// <summary>
@@ -95,13 +97,19 @@ internal static partial class ArtefactInspector
     /// Every role name the artefact expects to exist.
     /// <para>
     /// Two sources, because neither is complete on its own. Owners come from the
-    /// table of contents, which is structured and reliable — the owner is the
-    /// last field of an entry. Grantees exist only in the DDL text, because the
-    /// table of contents does not record them, so those are read with a pattern
-    /// and the result is **best effort by construction**. That is acceptable
-    /// here and nowhere else: this reading informs a warning before the drill,
-    /// while the authoritative answer comes after the restore, by comparing what
-    /// the artefact referenced against <c>pg_roles</c> in the restored cluster.
+    /// table of contents, where the owner is the last field of an entry.
+    /// Grantees exist only in the DDL text, because the table of contents does
+    /// not record them, so those are read with a pattern and the result is
+    /// **best effort by construction**. That is acceptable here and nowhere
+    /// else: this reading informs a warning before the drill, while the
+    /// authoritative answer comes after the restore, by comparing what the
+    /// artefact referenced against <c>pg_roles</c> in the restored cluster.
+    /// </para>
+    /// <para>
+    /// The table of contents writes identifiers unquoted, so a role named
+    /// <c>"Reporting Role"</c> is read from it as <c>Role</c>. The DDL quotes
+    /// properly and carries the same role correctly, so the cost of that is a
+    /// spare placeholder role nothing uses — never a missing one.
     /// </para>
     /// </summary>
     internal static IReadOnlyList<string> ParseReferencedRoles(string tableOfContents, string ddl)
@@ -110,14 +118,26 @@ internal static partial class ArtefactInspector
 
         foreach (var line in tableOfContents.Split('\n'))
         {
-            var entry = line.Trim();
-            if (entry.Length == 0 || entry.StartsWith(';'))
+            var entry = line.TrimEnd();
+            if (entry.Length == 0 || entry.TrimStart().StartsWith(';'))
             {
                 continue;
             }
 
-            var fields = entry.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (fields.Length >= 2)
+            // pg_restore prints one entry as
+            //     "%d; %u %u %s %s %s %s"   dumpId, tableoid, oid, desc, schema, name, owner
+            // and the owner is an EMPTY field when the object has none — an
+            // extension, or a comment on one. Trimming the line and taking the
+            // last field reads the extension's NAME as a role, so the agent
+            // creates a role called `pgcrypto` and the report tells the customer
+            // their artefact references it. Found by putting an extension in the
+            // verification fixture.
+            //
+            // A field count from the left is not available instead, because the
+            // description is several words for some entry types — `SEQUENCE
+            // OWNED BY`, `FK CONSTRAINT`, `TABLE DATA`.
+            var fields = line.TrimEnd('\r', '\n').Split(' ');
+            if (fields.Length >= 2 && fields[^1].Length > 0)
             {
                 Add(roles, fields[^1]);
             }

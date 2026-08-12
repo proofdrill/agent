@@ -59,6 +59,20 @@ public class ArtefactInspectorTests
         Assert.DoesNotContain("-", ArtefactInspector.ParseReferencedRoles(TableOfContents, ""));
     }
 
+    // Copied from a real `pg_restore --list`, trailing space included, because
+    // the trailing space IS the finding: pg_restore prints the owner as an empty
+    // field for an object that has none. Read as "the last thing on the line",
+    // the extension's own name becomes a role, and the report tells the customer
+    // their artefact references a role called pgcrypto.
+    [Fact]
+    public void An_extension_is_not_a_role()
+    {
+        var roles = ArtefactInspector.ParseReferencedRoles(
+            "2; 3079 16386 EXTENSION - pgcrypto \n3447; 0 0 COMMENT - EXTENSION pgcrypto \n", "");
+
+        Assert.Empty(roles);
+    }
+
     [Fact]
     public void Grantees_are_read_from_the_ddl_because_the_contents_do_not_record_them()
     {

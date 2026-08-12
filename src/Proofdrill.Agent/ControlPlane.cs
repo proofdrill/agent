@@ -148,7 +148,11 @@ internal sealed class ControlPlane(
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(origin, "/api/v1/agents/reports"))
         {
-            Content = new StringContent(envelope.ToJsonString(), Encoding.UTF8, "application/json"),
+            // ReportJson.Format, because the control plane stores this text
+            // verbatim and an evidence pack hands it to an auditor years later.
+            // What goes on the wire is what somebody eventually reads.
+            Content = new StringContent(
+                envelope.ToJsonString(ReportJson.Format), Encoding.UTF8, "application/json"),
         };
 
         if (jobId is not null)

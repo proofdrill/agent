@@ -34,27 +34,33 @@ internal static partial class SecurityDdl
         var policies = new SortedSet<string>(StringComparer.Ordinal);
         var grants = new SortedSet<string>(StringComparer.Ordinal);
 
-        foreach (Match match in RowLevelSecurity().Matches(ddl))
+        // Whole statements, from <see cref="Ddl.Split"/>, and never a pattern
+        // reading up to the next semicolon: a policy's USING expression can
+        // contain one inside a string literal, and a truncation applied to both
+        // sides alike would make two different policies compare equal.
+        foreach (var statement in Ddl.Split(ddl))
         {
-            rls.Add(Normalise(match.Value));
-        }
-
-        foreach (Match match in Policy().Matches(ddl))
-        {
-            policies.Add(Normalise(match.Value));
-        }
-
-        foreach (Match match in Grant().Matches(ddl))
-        {
-            grants.Add(Normalise(match.Value));
+            if (RowLevelSecurity().IsMatch(statement))
+            {
+                rls.Add(Normalise(statement));
+            }
+            else if (Policy().IsMatch(statement))
+            {
+                policies.Add(Normalise(statement));
+            }
+            else if (Grant().IsMatch(statement))
+            {
+                grants.Add(Normalise(statement));
+            }
         }
 
         return new GuaranteeSet(rls, policies, grants);
     }
 
     /// <summary>
-    /// Whitespace collapsed, and the two clauses that are **sets** put in a
-    /// canonical order.
+    /// The two clauses that are **sets** put in a canonical order. Whitespace is
+    /// already collapsed by <see cref="Ddl.Split"/>, which does it outside quoted
+    /// text only.
     /// <para>
     /// Reordering a clause would hide differences and is never done. Reordering
     /// the contents of a set-valued clause hides nothing, because the order was
@@ -70,9 +76,7 @@ internal static partial class SecurityDdl
     /// </summary>
     private static string Normalise(string statement)
     {
-        var collapsed = Whitespace().Replace(statement.Trim(), " ").TrimEnd(';').Trim();
-
-        collapsed = ToClause().Replace(collapsed, match =>
+        var collapsed = ToClause().Replace(statement, match =>
             $"TO {SortList(match.Groups["roles"].Value)}");
 
         return PrivilegeList().Replace(collapsed, match =>
@@ -86,29 +90,14 @@ internal static partial class SecurityDdl
             .Where(item => item.Length > 0)
             .Order(StringComparer.Ordinal));
 
-    /// <summary>
-    /// What each side has that the other does not, in both directions. A
-    /// restored database that gained a policy is as much a finding as one that
-    /// lost it.
-    /// </summary>
-    public static (IReadOnlyList<string> Lost, IReadOnlyList<string> Gained) Compare(
-        IReadOnlySet<string> declared,
-        IReadOnlySet<string> restored) =>
-        ([.. declared.Except(restored, StringComparer.Ordinal).Order(StringComparer.Ordinal)],
-         [.. restored.Except(declared, StringComparer.Ordinal).Order(StringComparer.Ordinal)]);
-
-    [GeneratedRegex(@"^\s*ALTER\s+TABLE\b[^;]*?\bROW\s+LEVEL\s+SECURITY\s*;",
-        RegexOptions.Multiline | RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^ALTER\s+TABLE\b.*\bROW\s+LEVEL\s+SECURITY$", RegexOptions.IgnoreCase)]
     private static partial Regex RowLevelSecurity();
 
-    [GeneratedRegex(@"^\s*CREATE\s+POLICY\b[^;]*;", RegexOptions.Multiline | RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^CREATE\s+POLICY\b", RegexOptions.IgnoreCase)]
     private static partial Regex Policy();
 
-    [GeneratedRegex(@"^\s*(?:GRANT|REVOKE)\b[^;]*;", RegexOptions.Multiline | RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^(?:GRANT|REVOKE)\b", RegexOptions.IgnoreCase)]
     private static partial Regex Grant();
-
-    [GeneratedRegex(@"\s+")]
-    private static partial Regex Whitespace();
 
     // A role list contains no brackets and no string literals, and saying so is
     // what keeps these patterns out of a policy's USING expression — where the

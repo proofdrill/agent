@@ -3,20 +3,20 @@
   "agent": {
     "id": "agt_example",
     "version": "0.0.0.0",
-    "hostname": "006a45258a4d"
+    "hostname": "125ec726283e"
   },
   "report": {
     "outcome": "passed",
-    "startedAt": "2026-08-11T10:18:56Z",
+    "startedAt": "2026-08-12T12:50:24Z",
     "postgresMajor": 17,
     "artefact": {
       "fileName": "db.dump",
-      "sizeBytes": 519734,
-      "lastModified": "2026-08-11T10:18:56Z",
+      "sizeBytes": 519745,
+      "lastModified": "2026-08-12T12:50:24Z",
       "dumpedFromMajor": 17
     },
     "measuredRpoSeconds": 0,
-    "measuredRtoMilliseconds": 185,
+    "measuredRtoMilliseconds": 108,
     "checks": [
       {
         "level": 1,
@@ -49,6 +49,36 @@
         "detail": "20000 row(s) across 1 table(s)"
       },
       {
+        "level": 2,
+        "key": "table_definitions_identical",
+        "outcome": "passed",
+        "detail": "all 2 table definition statement(s) the artefact declares are present in the restored database, identical"
+      },
+      {
+        "level": 2,
+        "key": "sequences_present",
+        "outcome": "passed",
+        "detail": "all 3 sequence statement(s) the artefact declares are present in the restored database, identical"
+      },
+      {
+        "level": 2,
+        "key": "constraints_identical",
+        "outcome": "passed",
+        "detail": "all 1 constraint(s) the artefact declares are present in the restored database, identical"
+      },
+      {
+        "level": 2,
+        "key": "sequences_ahead_of_their_data",
+        "outcome": "passed",
+        "detail": "all 1 sequence(s) owned by a column will hand out a value above the largest already stored"
+      },
+      {
+        "level": 2,
+        "key": "encoding_preserved",
+        "outcome": "passed",
+        "detail": "the artefact was written in UTF8 and the restored database is UTF8"
+      },
+      {
         "level": 3,
         "key": "rls_enabled_and_forced_preserved",
         "outcome": "passed",
@@ -79,19 +109,20 @@
     "observations": [
       "the artefact declares 1 table(s), 1 policy(ies), 2 row level security statement(s) and 1 grant(s)",
       "the artefact references role(s): app_role, source",
-      "the artefact does not carry the cluster globals, so 2 role(s) were created empty to let the restore complete: app_role, source"
+      "the artefact does not carry the cluster globals, so 2 role(s) were created empty to let the restore complete: app_role, source",
+      "the artefact declares no extensions, foreign keys, functions or triggers, so those comparisons had nothing to compare"
     ],
     "notAttempted": [
       "row_counts_within_tolerance: a tolerance needs a previous drill to compare against. The 1 count(s) in this report are what the next one will be measured against.",
       "level 3, role attributes: roles are cluster-wide and a per-database pg_dump does not contain them, so whether any role holds BYPASSRLS cannot be tested. Add the pg_dumpall --globals-only artefact to this target and it becomes testable. This is a correction, not a verdict.",
       "level 3, application role isolation: the placeholder roles have no memberships or attributes, so what the real application role could read cannot be established from this artefact alone.",
-      "level 3, customer SQL assertions: not implemented yet",
-      "level 2 entirely: extensions, sequences, constraints, foreign keys, functions and triggers"
+      "level 2, collation: a pg_dump taken without --create does not record the database's collation, so the restored copy is built with the C collation. Text ordering, and every index over a text column, follows C rules here whatever the original used — this drill neither checks that they match nor claims they do.",
+      "level 3, customer SQL assertions: not implemented yet"
     ]
   },
   "agentSignature": {
     "algorithm": "HMAC-SHA256",
     "keyId": "agt_example",
-    "value": "NAwPZ2moJ-xfsYveDqTMkRJtm03Xo79VRnnCcpf6GQ4"
+    "value": "Iupb774Zb1dta_Z-sB6ggHG3ZwB4XQxetp6MB5CP_yM"
   }
 }

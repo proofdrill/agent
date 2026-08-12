@@ -2,10 +2,12 @@
 
 > **Status: early development. There is no release and no published image.**
 > `proofdrill drill` restores a `pg_dump -Fc` archive into a throwaway
-> PostgreSQL and runs the **level 1** assertions against it, with measured RPO
-> and RTO. Levels 2 and 3 are not implemented, and every run prints what it did
-> not check rather than leaving it to be assumed. There is no agent registration,
-> no storage, and no control plane yet: this build takes a file path.
+> PostgreSQL and runs the **level 1, 2 and 3** assertions against it, with
+> measured RPO and RTO. It fetches from S3-compatible storage, and
+> `proofdrill run` takes work from a control plane and reports back, signed.
+> What is still missing — your own SQL assertions, and the role attributes that
+> need a `pg_dumpall --globals-only` artefact — is printed by every run under
+> what it did not check, rather than left to be assumed.
 
 Proofdrill proves that a database backup restores — and that the restored
 database still enforces the guarantees the original enforced.
@@ -39,8 +41,11 @@ checks; the third is the one that matters and that nobody else does:
 1. **Did the restore happen?** The artefact exists and is inside its window, the
    restore exits clean, the expected tables are there, the counts are within
    tolerance.
-2. **Is it still that database?** Extensions, sequences, constraints, foreign
-   keys, roles, grants, functions, triggers.
+2. **Is it still that database?** The tables and their columns, the constraints,
+   the foreign keys, the extensions, the functions and the triggers, each
+   compared against what the archive itself declares. And every sequence is
+   checked against the data it owns: one that came back at the beginning
+   restores perfectly cleanly and fails your next insert.
 3. **Do the guarantees still hold?** Row-level security enabled *and forced*
    where it was. Identical policies. The application role still cannot read
    another tenant's rows. No role gained `BYPASSRLS`. Your own SQL assertions

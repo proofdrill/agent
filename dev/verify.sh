@@ -9,21 +9,31 @@
 # cluster that produced the dump would prove nothing about them, and that is the
 # whole finding of spike 0.
 #
-# Three artefacts, because a suite whose checks can only pass is decoration:
+# Five artefacts, because a suite whose checks can only pass is decoration:
 #
-#   with-roles.dump    rows, forced RLS, a policy, a grant   -> drill PASSES level 1
-#   without-roles.dump the same without the grant            -> drill PASSES level 1
-#   empty-table.dump   a valid archive containing NO rows    -> drill FAILS
+#   with-roles.dump        rows, forced RLS, a policy, a grant, and level 2's
+#                          material: an extension, a foreign key, a check
+#                          constraint, a function and a trigger  -> PASSES
+#   without-roles.dump     the same without the grant             -> PASSES
+#   enabled-not-forced.dump  RLS enabled and not forced           -> PASSES, and
+#                          the report must not call that enforcement
+#   empty-table.dump       a valid archive containing NO rows     -> FAILS
+#   stale-sequence.dump    every row present and the sequence put
+#                          back to the beginning                  -> FAILS
 #
-# The third is the product's founding failure: an archive that is well formed,
-# restores with exit code 0, and carries nothing.
+# The last two are the failures nothing else sees. An archive that is well
+# formed, restores with exit code 0 and carries nothing is the product's
+# founding failure; a sequence behind its own data restores just as cleanly and
+# fails the next INSERT instead, weeks later, on a database somebody was told
+# had been verified.
 #
 # NOT COVERED, and said here rather than discovered later: there is no test in
-# which a level 3 comparison legitimately FAILS. Making one end to end needs a
-# restore that loses a guarantee, and every way of manufacturing that is either
-# contrived or closed by the agent itself. The comparison has been watched
-# failing by hand — role ordering, before it was canonicalised — but that is not
-# an assertion. Unit tests over SecurityDdl.Compare are where this belongs.
+# which a level 2 or level 3 DDL comparison legitimately FAILS. Making one end
+# to end needs a restore that loses a constraint or a guarantee, and every way of
+# manufacturing that is either contrived or closed by the agent itself. The
+# comparisons have been watched failing by hand — role ordering, before it was
+# canonicalised — but that is not an assertion. Unit tests over SchemaDdl,
+# SecurityDdl and Ddl.Difference are where that belongs.
 set -uo pipefail
 
 PG_MAJOR="$(ls /usr/lib/postgresql | sort -n | tail -1)"
@@ -59,7 +69,7 @@ psql -q -v ON_ERROR_STOP=1 -d postgres -c 'CREATE ROLE app_role NOLOGIN'
 # names a role which cannot be recreated does not restore — leaving a table with
 # row level security enabled and no policy on it.
 psql -q -v ON_ERROR_STOP=1 -d postgres -c 'CREATE ROLE "Reporting Role" NOLOGIN'
-for database in with_roles without_roles empty_table enabled_not_forced; do
+for database in with_roles without_roles empty_table enabled_not_forced stale_sequence; do
   psql -q -v ON_ERROR_STOP=1 -d postgres -c "CREATE DATABASE $database"
   psql -q -v ON_ERROR_STOP=1 -d "$database" <<'SQL'
 CREATE TABLE tenant_rows (
@@ -75,9 +85,33 @@ done
 
 # Everything except enabled_not_forced is FORCED, which is the distinction the
 # whole product turns on: enabled leaves the table owner exempt, forced does not.
-for database in with_roles without_roles empty_table; do
+for database in with_roles without_roles empty_table stale_sequence; do
   psql -q -v ON_ERROR_STOP=1 -d "$database" -c 'ALTER TABLE tenant_rows FORCE ROW LEVEL SECURITY'
 done
+
+# Level 2's material, and on with_roles alone: every other artefact here exists
+# to make one particular check fail, and a fixture that changed under them would
+# move what those cases prove.
+psql -q -v ON_ERROR_STOP=1 -d with_roles <<'SQL'
+CREATE EXTENSION pgcrypto;
+CREATE TABLE customers (
+  id   bigserial PRIMARY KEY,
+  name text NOT NULL,
+  CONSTRAINT customers_name_not_blank CHECK (length(name) > 0)
+);
+INSERT INTO customers (name) SELECT 'customer ' || g FROM generate_series(1, 50) AS g;
+ALTER TABLE tenant_rows ADD COLUMN customer_id bigint REFERENCES customers (id);
+-- The semicolons in this body are the point of it. A comparison that reads DDL
+-- up to the first semicolon truncates both sides here at the same place, and
+-- then reports a function whose body changed as identical.
+CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM 1;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER stamp_rows BEFORE UPDATE ON tenant_rows FOR EACH ROW EXECUTE FUNCTION stamp();
+SQL
 
 # Policies that name roles. Before the agent learned to read a policy's own TO
 # clause these did not restore at all, and what was left was a table with row
@@ -86,7 +120,7 @@ psql -q -v ON_ERROR_STOP=1 -d with_roles -c \
   "CREATE POLICY reporting_read ON tenant_rows FOR SELECT TO app_role, \"Reporting Role\" USING (true)"
 
 # empty_table deliberately keeps no rows: that is the artefact under test.
-for database in with_roles without_roles enabled_not_forced; do
+for database in with_roles without_roles enabled_not_forced stale_sequence; do
   psql -q -v ON_ERROR_STOP=1 -d "$database" -c \
     "INSERT INTO tenant_rows (tenant_id, payload) SELECT gen_random_uuid(), repeat('x', 200) FROM generate_series(1, 20000)"
 done
@@ -94,13 +128,22 @@ done
 # The only difference between the first two artefacts.
 psql -q -v ON_ERROR_STOP=1 -d with_roles -c 'GRANT SELECT, INSERT ON tenant_rows TO app_role'
 
+# And the only thing wrong with the fifth: the sequence is put back to the
+# beginning while its 20000 rows stay where they are. This is not contrived —
+# it is what a table copied by hand, or restored by a tool that does not carry
+# the sequence, looks like afterwards.
+psql -q -v ON_ERROR_STOP=1 -d stale_sequence \
+  -c "SELECT setval('tenant_rows_id_seq', 1, false)" >/dev/null
+
 pg_dump -Fc -d with_roles    -f /work/with-roles.dump
 pg_dump -Fc -d without_roles -f /work/without-roles.dump
 pg_dump -Fc -d empty_table   -f /work/empty-table.dump
 pg_dump -Fc -d enabled_not_forced -f /work/enabled-not-forced.dump
-note "with-roles.dump    $(du -h /work/with-roles.dump | cut -f1)"
-note "without-roles.dump $(du -h /work/without-roles.dump | cut -f1)"
-note "empty-table.dump   $(du -h /work/empty-table.dump | cut -f1)"
+pg_dump -Fc -d stale_sequence -f /work/stale-sequence.dump
+note "with-roles.dump     $(du -h /work/with-roles.dump | cut -f1)"
+note "without-roles.dump  $(du -h /work/without-roles.dump | cut -f1)"
+note "empty-table.dump    $(du -h /work/empty-table.dump | cut -f1)"
+note "stale-sequence.dump $(du -h /work/stale-sequence.dump | cut -f1)"
 
 pg_ctl -D "$SRC_DATA" -m immediate stop >/dev/null 2>&1
 rm -rf /work/source
@@ -148,6 +191,50 @@ say "2c. enabled is not forced, and the report must not blur them"
 proofdrill drill --dump-file /work/enabled-not-forced.dump --rpo-window-hours 24 \
   | grep -q "no table with row level security FORCED"
 expect "an enabled but unforced table is named as such" 0 "$?"
+
+# ---------------------------------------------------------------------------
+say "2d. level 2 — is it still that database?"
+# ---------------------------------------------------------------------------
+LEVEL2="$(proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 --json)"
+for key in extensions_present table_definitions_identical sequences_present \
+           constraints_identical foreign_keys_identical functions_identical \
+           triggers_identical sequences_ahead_of_their_data encoding_preserved; do
+  if printf '%s' "$LEVEL2" | tr -d ' \n' | grep -q "\"key\":\"$key\",\"outcome\":\"passed\""; then
+    printf '  [pass] %s\n' "$key"
+  else
+    printf '  [FAIL] %s did not pass\n' "$key"
+    FAILURES=$((FAILURES + 1))
+  fi
+done
+
+# functions_identical passing above is the whole of what this fixture can prove
+# about the function: its body carries two semicolons, so a comparison that read
+# DDL up to the first one would report a false DIFFERENCE here. The other
+# direction — two bodies that differ below their first line compared EQUAL — is
+# the dangerous one and it cannot be manufactured through a restore. It is
+# asserted in the unit suite, over Ddl.Split and SchemaDdl.
+note "the false-pass direction lives in the unit suite; a restore cannot produce it"
+
+# ---------------------------------------------------------------------------
+say "2e. a sequence behind its own data — the failure nothing else can see"
+# ---------------------------------------------------------------------------
+# pg_restore exits 0, all 20000 rows come back, every constraint is there, and
+# the DDL matches the artefact exactly. The next INSERT fails with a duplicate
+# key. Only asking the restored database finds it.
+# Printed in full, like the empty archive below it: the sentence a customer
+# reads when this fires is the whole value of the check, and a log that hides it
+# cannot show that it says something usable.
+proofdrill drill --dump-file /work/stale-sequence.dump --rpo-window-hours 24
+expect "a sequence left behind its own data is a failed drill" 1 "$?"
+
+# Captured first and grepped after, because pipefail makes the pipeline carry
+# the drill's own exit code — which is 1 here, on purpose.
+STALE="$(proofdrill drill --dump-file /work/stale-sequence.dump --rpo-window-hours 24 --json)"
+printf '%s' "$STALE" | tr -d ' \n' | grep -q '"key":"sequences_ahead_of_their_data","outcome":"failed"'
+expect "and that is the check that failed, by name" 0 "$?"
+
+printf '%s' "$STALE" | tr -d ' \n' | grep -q '"key":"restore_exit_code","outcome":"passed"'
+expect "while the restore itself exited clean, which is what makes it invisible" 0 "$?"
 
 # ---------------------------------------------------------------------------
 say "3. a valid archive with no rows must FAIL — the founding failure"

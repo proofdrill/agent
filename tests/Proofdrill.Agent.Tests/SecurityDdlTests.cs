@@ -59,8 +59,8 @@ public class SecurityDdlTests
         var restored = SecurityDdl.Extract(
             "CREATE POLICY p ON public.t FOR SELECT TO \"Reporting Role\", app_role USING (true);");
 
-        Assert.Empty(SecurityDdl.Compare(declared.Policies, restored.Policies).Lost);
-        Assert.Empty(SecurityDdl.Compare(declared.Policies, restored.Policies).Gained);
+        Assert.Empty(Ddl.Difference(declared.Policies, restored.Policies).Lost);
+        Assert.Empty(Ddl.Difference(declared.Policies, restored.Policies).Gained);
     }
 
     // And the other half of that fix: sorting a set must not blind the comparison
@@ -71,7 +71,7 @@ public class SecurityDdlTests
         var declared = SecurityDdl.Extract("CREATE POLICY p ON public.t FOR SELECT TO app_role USING (true);");
         var restored = SecurityDdl.Extract("CREATE POLICY p ON public.t FOR SELECT TO other_role USING (true);");
 
-        var (lost, gained) = SecurityDdl.Compare(declared.Policies, restored.Policies);
+        var (lost, gained) = Ddl.Difference(declared.Policies, restored.Policies);
 
         Assert.Single(lost);
         Assert.Single(gained);
@@ -85,7 +85,7 @@ public class SecurityDdlTests
         var restored = SecurityDdl.Extract(
             "CREATE POLICY p ON public.t FOR SELECT TO app_role, extra_role USING (true);");
 
-        Assert.NotEmpty(SecurityDdl.Compare(declared.Policies, restored.Policies).Lost);
+        Assert.NotEmpty(Ddl.Difference(declared.Policies, restored.Policies).Lost);
     }
 
     [Fact]
@@ -94,7 +94,7 @@ public class SecurityDdlTests
         var declared = SecurityDdl.Extract("GRANT SELECT, INSERT ON TABLE public.t TO app_role;");
         var restored = SecurityDdl.Extract("GRANT INSERT, SELECT ON TABLE public.t TO app_role;");
 
-        Assert.Empty(SecurityDdl.Compare(declared.Grants, restored.Grants).Lost);
+        Assert.Empty(Ddl.Difference(declared.Grants, restored.Grants).Lost);
     }
 
     [Fact]
@@ -103,7 +103,7 @@ public class SecurityDdlTests
         var declared = SecurityDdl.Extract("GRANT SELECT ON TABLE public.t TO app_role;");
         var restored = SecurityDdl.Extract("GRANT SELECT, DELETE ON TABLE public.t TO app_role;");
 
-        Assert.NotEmpty(SecurityDdl.Compare(declared.Grants, restored.Grants).Gained);
+        Assert.NotEmpty(Ddl.Difference(declared.Grants, restored.Grants).Gained);
     }
 
     // The canonicaliser must not reach inside an expression. `TO` is an ordinary
@@ -116,7 +116,7 @@ public class SecurityDdlTests
         var restored = SecurityDdl.Extract(
             "CREATE POLICY p ON public.t USING ((status = 'ASSIGNED TO billing'::text));");
 
-        Assert.Empty(SecurityDdl.Compare(declared.Policies, restored.Policies).Lost);
+        Assert.Empty(Ddl.Difference(declared.Policies, restored.Policies).Lost);
         Assert.Contains("ASSIGNED TO billing", declared.Policies.Single(), StringComparison.Ordinal);
     }
 
@@ -129,7 +129,7 @@ public class SecurityDdlTests
         var declared = SecurityDdl.Extract($"{Rls}\n{Forced}");
         var restored = SecurityDdl.Extract(Rls);
 
-        var (lost, gained) = SecurityDdl.Compare(declared.RowLevelSecurity, restored.RowLevelSecurity);
+        var (lost, gained) = Ddl.Difference(declared.RowLevelSecurity, restored.RowLevelSecurity);
 
         Assert.Single(lost);
         Assert.Contains("FORCE", lost[0], StringComparison.Ordinal);
@@ -145,7 +145,7 @@ public class SecurityDdlTests
             CREATE POLICY appeared ON public.t USING (true);
             """);
 
-        var (lost, gained) = SecurityDdl.Compare(declared.Policies, restored.Policies);
+        var (lost, gained) = Ddl.Difference(declared.Policies, restored.Policies);
 
         Assert.Empty(lost);
         Assert.Single(gained);
@@ -156,11 +156,24 @@ public class SecurityDdlTests
     public void Identical_sets_compare_equal_in_both_directions()
     {
         var ddl = $"{Rls}\n{Forced}\nCREATE POLICY p ON public.t USING (true);";
-        var (lost, gained) = SecurityDdl.Compare(
+        var (lost, gained) = Ddl.Difference(
             SecurityDdl.Extract(ddl).Policies, SecurityDdl.Extract(ddl).Policies);
 
         Assert.Empty(lost);
         Assert.Empty(gained);
+    }
+
+    // The defect the statement splitter closed, on the product's central check.
+    // A policy expression can carry a semicolon inside a literal; read up to the
+    // first one, these two truncate to the same text, compare EQUAL, and the
+    // report says the guarantee survived the restore.
+    [Fact]
+    public void Two_policies_that_differ_after_a_semicolon_in_a_literal_are_not_equal()
+    {
+        var declared = SecurityDdl.Extract("CREATE POLICY p ON t USING ((tag = 'a;keep'::text));");
+        var restored = SecurityDdl.Extract("CREATE POLICY p ON t USING ((tag = 'a;lost'::text));");
+
+        Assert.Single(Ddl.Difference(declared.Policies, restored.Policies).Lost);
     }
 
     [Fact]

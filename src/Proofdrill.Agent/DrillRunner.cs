@@ -28,6 +28,55 @@ internal static partial class DrillRunner
     /// </summary>
     private const int DiskMultiplier = 3;
 
+    /// <summary>Used only when the artefact does not record one of its own.</summary>
+    private const string DefaultEncoding = "UTF8";
+
+    /// <summary>
+    /// How many column-owned sequences one drill measures. A ceiling rather than
+    /// a scan, because each one costs a <c>max()</c> over its own table; going
+    /// over it is reported and never silent.
+    /// </summary>
+    private const int SequenceCeiling = 25;
+
+    /// <summary>
+    /// Every sequence a column owns, the next value it will hand out, and the
+    /// largest value already in that column.
+    /// <para>
+    /// <c>pg_depend</c> rather than a name convention: <c>'a'</c> is the
+    /// dependency a <c>serial</c> column creates and <c>'i'</c> the one an
+    /// identity column creates, and neither can be found by looking for a
+    /// sequence called <c>t_id_seq</c>. Sequences that count downwards are left
+    /// out — <c>max()</c> is the wrong question for them — and the total says how
+    /// many there were.
+    /// </para>
+    /// </summary>
+    private static readonly string SequenceProbe =
+        $"""
+        WITH owned AS (
+            SELECT format('%I.%I', n.nspname, c.relname)   AS sequence_name,
+                   format('%I.%I', tn.nspname, t.relname)  AS table_name,
+                   a.attname                               AS column_name,
+                   count(*) OVER ()                        AS total
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_depend d ON d.classid = 'pg_class'::regclass AND d.objid = c.oid
+                            AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+            JOIN pg_class t ON t.oid = d.refobjid
+            JOIN pg_namespace tn ON tn.oid = t.relnamespace
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
+            JOIN pg_sequences s ON s.schemaname = n.nspname AND s.sequencename = c.relname
+            WHERE c.relkind = 'S' AND s.increment_by > 0
+        )
+        SELECT sequence_name, table_name, column_name, total,
+               (xpath('/row/c/text()', query_to_xml(
+                   format('SELECT CASE WHEN is_called THEN last_value + 1 ELSE last_value END AS c FROM %s',
+                          sequence_name), false, true, '')))[1]::text::bigint,
+               (xpath('/row/c/text()', query_to_xml(
+                   format('SELECT max(%I) AS c FROM %s', column_name, table_name),
+                   false, true, '')))[1]::text::bigint
+        FROM (SELECT * FROM owned ORDER BY sequence_name LIMIT {SequenceCeiling}) probed
+        """;
+
     public static async Task<DrillReport> RunAsync(DrillOptions options, CancellationToken cancellationToken)
     {
         var startedAt = DateTimeOffset.UtcNow;
@@ -123,18 +172,20 @@ internal static partial class DrillRunner
             // performs a subset teaches people to distrust the flag exactly when
             // they are being careful.
             notAttempted.Add("restore: --dry-run was given, so no cluster was created and nothing was restored");
-            notAttempted.Add("level 1 assertions: they require a restored database");
-            notAttempted.Add("level 3 assertions: not implemented yet");
+            notAttempted.Add(
+                "every assertion after the artefact itself: levels 1, 2 and 3 all ask their questions of a restored " +
+                "database, and this run restored nothing");
 
             return new DrillReport(
                 DrillReport.CurrentVersion, Outcome.CouldNotAttempt, AgentVersion(), major,
                 startedAt, artefactFacts, new Measurements(Math.Round(ageHours, 2), null),
-                checks, [], rowCounts, observations, notAttempted);
+                checks, [], [], rowCounts, observations, notAttempted);
         }
 
         Directory.CreateDirectory(options.WorkRoot);
         await using var cluster = new ThrowawayCluster(binaries, options.WorkRoot);
-        await cluster.CreateAsync(cancellationToken).ConfigureAwait(false);
+        await cluster.CreateAsync(ClusterEncoding(contents.Shape.Encoding, observations), cancellationToken)
+            .ConfigureAwait(false);
         await cluster.StartAsync(cancellationToken).ConfigureAwait(false);
 
         var created = await cluster.QueryAsync("postgres", $"CREATE DATABASE {RestoredDatabase}", cancellationToken)
@@ -259,14 +310,10 @@ internal static partial class DrillRunner
                 "what the real application role could read cannot be established from this artefact alone.");
         }
 
-        // ---- level 3: do the guarantees still hold? -------------------------
-        //
-        // The restored database is dumped with the same pg_dump that wrote the
-        // artefact, so both sides of the comparison go through one normalisation
-        // and a difference means a difference. See SecurityDdl for why reading
-        // pg_policies instead would report every policy as changed.
-        var level3 = new List<Check>();
-
+        // The restored database's own DDL, written by the same pg_dump that wrote
+        // the artefact, so both sides of every comparison below go through one
+        // normalisation and a difference means a difference. See SecurityDdl for
+        // why reading pg_policies instead would report every policy as changed.
         var restoredDdl = await Processes.RunAsync(
             binaries.PgDump,
             ["--section", "pre-data", "--section", "post-data", "--file", "-", "--dbname", RestoredDatabase],
@@ -277,9 +324,100 @@ internal static partial class DrillRunner
         if (!restoredDdl.Succeeded)
         {
             throw new DrillCannotBeAttemptedException(
-                restoredDdl.Describe("dumping the restored database to compare its guarantees"));
+                restoredDdl.Describe("dumping the restored database to compare it against the artefact"));
         }
 
+        // ---- level 2: is it still THAT database? ----------------------------
+        //
+        // pg_restore exiting non-zero already says that something did not come
+        // back; these say WHAT, which is the difference between a report a person
+        // can act on and a number they have to take to somebody else. And two of
+        // them see failures the exit code cannot: a sequence left behind its own
+        // data and an archive restored into another encoding both exit 0.
+        var level2 = new List<Check>();
+        var restoredShape = SchemaDdl.Extract(restoredDdl.StandardOutput);
+        var declaredShape = contents.Shape;
+        var absent = new List<string>();
+
+        Family(level2, absent, "extensions_present",
+            declaredShape.Extensions, restoredShape.Extensions, "extension");
+        // "statement" for these two, and the count is of statements: pg_dump
+        // writes a table over a CREATE TABLE plus an ALTER COLUMN for each
+        // default, and a sequence over three. Saying "6 sequences" where the
+        // database has two would be a number the reader cannot reconcile with
+        // anything they can see.
+        Family(level2, absent, "table_definitions_identical",
+            declaredShape.Tables, restoredShape.Tables, "table definition statement");
+        Family(level2, absent, "sequences_present",
+            declaredShape.Sequences, restoredShape.Sequences, "sequence statement");
+        Family(level2, absent, "constraints_identical",
+            declaredShape.Constraints, restoredShape.Constraints, "constraint");
+        Family(level2, absent, "foreign_keys_identical",
+            declaredShape.ForeignKeys, restoredShape.ForeignKeys, "foreign key");
+        Family(level2, absent, "functions_identical",
+            declaredShape.Functions, restoredShape.Functions, "function");
+        Family(level2, absent, "triggers_identical",
+            declaredShape.Triggers, restoredShape.Triggers, "trigger");
+
+        if (absent.Count > 0)
+        {
+            // Said once, as an observation, and never as a row of checks that
+            // could not be attempted. A database with no triggers did not stop
+            // anybody from checking its triggers — there is nothing there — and a
+            // level whose list is mostly "nothing to compare" buries the lines
+            // that matter.
+            observations.Add(
+                $"the artefact declares no {Nouns(absent)}, so those comparisons had nothing to compare");
+        }
+
+        if (declaredShape.Extensions.Count > 0)
+        {
+            var installed = await cluster.QueryAsync(RestoredDatabase,
+                "SELECT extname || ' ' || extversion FROM pg_extension ORDER BY 1", cancellationToken)
+                .ConfigureAwait(false);
+
+            observations.Add(
+                "the restored database has extension(s): " +
+                string.Join(", ", installed.StandardOutput
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)));
+
+            notAttempted.Add(
+                "level 2, extension versions: an archive records which extensions a database had and not which " +
+                "version of each, so an extension that came back at a different version than production runs " +
+                "cannot be detected from the artefact. The versions restored here are in the observations.");
+        }
+
+        await MeasureSequencesAsync(cluster, level2, observations, cancellationToken).ConfigureAwait(false);
+
+        var serverEncoding = (await cluster.QueryAsync(RestoredDatabase, "SHOW server_encoding", cancellationToken)
+            .ConfigureAwait(false)).StandardOutput.Trim();
+
+        if (declaredShape.Encoding is { Length: > 0 } declaredEncoding)
+        {
+            level2.Add(string.Equals(declaredEncoding, serverEncoding, StringComparison.OrdinalIgnoreCase)
+                ? new Check("encoding_preserved", Outcome.Passed,
+                    $"the artefact was written in {declaredEncoding} and the restored database is {serverEncoding}")
+                : new Check("encoding_preserved", Outcome.Failed,
+                    $"the artefact was written in {declaredEncoding} and this is a {serverEncoding} database, so " +
+                    "every text column has been through a conversion the original never had"));
+        }
+        else
+        {
+            notAttempted.Add(
+                "level 2, encoding: this artefact does not record the encoding it was written in, so what the " +
+                $"restored database ({serverEncoding}) should have been compared against is unknown.");
+        }
+
+        // Never left to be assumed, on every run, because it is the one level 2
+        // question this design cannot answer from the artefact alone.
+        notAttempted.Add(
+            "level 2, collation: a pg_dump taken without --create does not record the database's collation, so the " +
+            "restored copy is built with the C collation. Text ordering, and every index over a text column, " +
+            "follows C rules here whatever the original used — this drill neither checks that they match nor " +
+            "claims they do.");
+
+        // ---- level 3: do the guarantees still hold? -------------------------
+        var level3 = new List<Check>();
         var restored = SecurityDdl.Extract(restoredDdl.StandardOutput);
 
         Compare(level3, "rls_enabled_and_forced_preserved",
@@ -363,26 +501,111 @@ internal static partial class DrillRunner
         }
 
         notAttempted.Add("level 3, customer SQL assertions: not implemented yet");
-        notAttempted.Add("level 2 entirely: extensions, sequences, constraints, foreign keys, functions and triggers");
 
-        // A level 3 failure is a failed drill. That is the whole product: a backup
-        // that restores with every row in place and its guarantees missing is not
-        // a successful restore. A could-not-attempt never lowers the verdict — it
-        // is a correction, and corrections do not decide anything.
-        var outcome = checks.Concat(level3).Any(c => c.Outcome == Outcome.Failed)
+        // A level 2 or level 3 failure is a failed drill. That is the whole
+        // product: a backup that restores with every row in place and its
+        // guarantees missing — or its sequences behind its data — is not a
+        // successful restore. A could-not-attempt never lowers the verdict; it is
+        // a correction, and corrections do not decide anything.
+        var outcome = checks.Concat(level2).Concat(level3).Any(c => c.Outcome == Outcome.Failed)
             ? Outcome.Failed
             : Outcome.Passed;
 
         return new DrillReport(
             DrillReport.CurrentVersion, outcome, AgentVersion(), major, startedAt, artefactFacts,
             new Measurements(Math.Round(ageHours, 2), Math.Round(clock.Elapsed.TotalSeconds, 3)),
-            checks, level3, rowCounts, observations, notAttempted);
+            checks, level2, level3, rowCounts, observations, notAttempted);
     }
 
     /// <summary>
-    /// One guarantee compared in both directions. A restored database that
-    /// <em>gained</em> a policy is as much a finding as one that lost it: either
-    /// way it is not the database the artefact describes.
+    /// The sequence question, asked of the restored database because no DDL can
+    /// answer it: for every sequence a column owns, is the next value it will
+    /// hand out above the largest value already stored?
+    /// <para>
+    /// A sequence that came back behind its own data does not fail the restore.
+    /// It exits zero, the row counts are right, the DDL matches — and the next
+    /// INSERT fails with a duplicate key, weeks later, on a database somebody was
+    /// told had been verified. It is the level 2 failure that is invisible
+    /// everywhere else, which is why it is worth two queries.
+    /// </para>
+    /// </summary>
+    private static async Task MeasureSequencesAsync(
+        ThrowawayCluster cluster,
+        List<Check> level2,
+        List<string> observations,
+        CancellationToken cancellationToken)
+    {
+        var probe = await cluster.QueryAsync(RestoredDatabase, SequenceProbe, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!probe.Succeeded)
+        {
+            level2.Add(new Check("sequences_ahead_of_their_data", Outcome.CouldNotAttempt,
+                probe.Describe("asking the restored database about its sequences")));
+            return;
+        }
+
+        var rows = ThrowawayCluster.Rows(probe).Where(row => row.Length == 6).ToList();
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        var behind = new List<string>();
+        var measured = 0;
+        var empty = 0;
+
+        foreach (var row in rows)
+        {
+            if (!long.TryParse(row[4], out var next))
+            {
+                behind.Add($"{row[0]} could not be read at all");
+                continue;
+            }
+
+            // No rows in the column means nothing for the sequence to be behind.
+            // Counted rather than dropped: a level whose numbers do not add up
+            // invites the reader to guess which ones were skipped.
+            if (!long.TryParse(row[5], out var largest))
+            {
+                empty++;
+                continue;
+            }
+
+            measured++;
+            if (next <= largest)
+            {
+                behind.Add($"{row[0]} will hand out {next} and {row[1]}.{row[2]} already holds {largest}");
+            }
+        }
+
+        if (long.TryParse(rows[0][3], out var total) && total > rows.Count)
+        {
+            // Never a silent cap: a truncated check that reads like a complete one
+            // is how a report starts overstating what it covered.
+            observations.Add(
+                $"sequences were measured on {rows.Count} of {total} owned by a column (per run ceiling)");
+        }
+
+        if (behind.Count > 0)
+        {
+            level2.Add(new Check("sequences_ahead_of_their_data", Outcome.Failed,
+                $"{behind.Count} sequence(s) came back behind their own data: {string.Join("; ", behind)}. " +
+                "The restore exited clean and the rows are all there; the next insert into each of those tables " +
+                "fails with a duplicate key."));
+            return;
+        }
+
+        var note = empty == 0 ? "" : $", and {empty} more own a column with no rows in it to be behind";
+        level2.Add(new Check("sequences_ahead_of_their_data", Outcome.Passed,
+            $"all {measured} sequence(s) owned by a column will hand out a value above the largest already " +
+            $"stored{note}"));
+    }
+
+    /// <summary>
+    /// One guarantee, level 3. An artefact that declares none of a guarantee is
+    /// worth saying out loud — a database with no policy at all is a fact about
+    /// the backup, not a quiet pass.
     /// </summary>
     private static void Compare(
         List<Check> checks,
@@ -399,13 +622,55 @@ internal static partial class DrillRunner
             return;
         }
 
-        var (lost, gained) = SecurityDdl.Compare(declared, restored);
+        checks.Add(Compared(key, declared, restored, noun));
+    }
+
+    /// <summary>
+    /// One family of level 2 statements, and silent when the database has none of
+    /// them: a database with no trigger did not stop anybody from checking its
+    /// triggers. What is absent is named once, by the caller, in a single
+    /// observation.
+    /// <para>
+    /// A family the artefact does not declare and the restored database has is
+    /// still compared, and still fails. An object that appeared is as much a
+    /// finding as one that was lost.
+    /// </para>
+    /// </summary>
+    private static void Family(
+        List<Check> checks,
+        List<string> absent,
+        string key,
+        IReadOnlySet<string> declared,
+        IReadOnlySet<string> restored,
+        string noun)
+    {
+        if (declared.Count == 0 && restored.Count == 0)
+        {
+            absent.Add(noun);
+            return;
+        }
+
+        checks.Add(Compared(key, declared, restored, noun));
+    }
+
+    /// <summary>
+    /// Two sets of statements compared in both directions. A restored database
+    /// that <em>gained</em> a policy — or a constraint, or a trigger — is as much
+    /// a finding as one that lost it: either way it is not the database the
+    /// artefact describes.
+    /// </summary>
+    private static Check Compared(
+        string key,
+        IReadOnlySet<string> declared,
+        IReadOnlySet<string> restored,
+        string noun)
+    {
+        var (lost, gained) = Ddl.Difference(declared, restored);
 
         if (lost.Count == 0 && gained.Count == 0)
         {
-            checks.Add(new Check(key, Outcome.Passed,
-                $"all {declared.Count} {noun}(s) the artefact declares are present in the restored database, identical"));
-            return;
+            return new Check(key, Outcome.Passed,
+                $"all {declared.Count} {noun}(s) the artefact declares are present in the restored database, identical");
         }
 
         var detail = new List<string>();
@@ -419,7 +684,37 @@ internal static partial class DrillRunner
             detail.Add($"appeared: {string.Join(" | ", gained)}");
         }
 
-        checks.Add(new Check(key, Outcome.Failed, string.Join("; ", detail)));
+        return new Check(key, Outcome.Failed, string.Join("; ", detail));
+    }
+
+    /// <summary>An English list of plurals: "extensions, functions or triggers".</summary>
+    private static string Nouns(IReadOnlyList<string> nouns) => nouns.Count == 1
+        ? $"{nouns[0]}s"
+        : string.Join(", ", nouns.Take(nouns.Count - 1).Select(noun => $"{noun}s")) + $" or {nouns[^1]}s";
+
+    /// <summary>
+    /// The encoding to build the throwaway cluster with: the artefact's own, and
+    /// UTF8 only when the artefact does not record one. The shape is checked
+    /// because this value comes out of a file somebody else wrote, and initdb
+    /// handed a word it does not know fails with a message about the word rather
+    /// than about the artefact.
+    /// </summary>
+    private static string ClusterEncoding(string? declared, List<string> observations)
+    {
+        if (declared is null or "")
+        {
+            return DefaultEncoding;
+        }
+
+        if (!EncodingName().IsMatch(declared))
+        {
+            observations.Add(
+                $"the artefact names an encoding this agent will not hand to initdb ('{declared}'), so the " +
+                $"restored database is {DefaultEncoding}");
+            return DefaultEncoding;
+        }
+
+        return declared;
     }
 
     private static async Task<int?> ReadSourceMajorAsync(
@@ -467,4 +762,7 @@ internal static partial class DrillRunner
 
     [GeneratedRegex(@"Dumped from database version:\s*(?<major>\d+)")]
     private static partial Regex DumpedFrom();
+
+    [GeneratedRegex(@"^[A-Za-z0-9_]{1,32}$")]
+    private static partial Regex EncodingName();
 }
