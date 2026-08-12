@@ -34,6 +34,13 @@
 # comparisons have been watched failing by hand — role ordering, before it was
 # canonicalised — but that is not an assertion. Unit tests over SchemaDdl,
 # SecurityDdl and Ddl.Difference are where that belongs.
+#
+# A customer assertion CAN fail here, and one does. with-roles.dump carries a
+# second policy that permits app_role to read every row, which defeats the tenant
+# isolation the first policy describes — while every derived comparison passes,
+# because the restored database's policies really are identical to the artefact's.
+# That is the case levels 1 to 3 cannot see and the customer's own SQL can, and it
+# is asserted end to end in 2f and 2g.
 set -uo pipefail
 
 PG_MAJOR="$(ls /usr/lib/postgresql | sort -n | tail -1)"
@@ -235,6 +242,209 @@ expect "and that is the check that failed, by name" 0 "$?"
 
 printf '%s' "$STALE" | tr -d ' \n' | grep -q '"key":"restore_exit_code","outcome":"passed"'
 expect "while the restore itself exited clean, which is what makes it invisible" 0 "$?"
+
+# ---------------------------------------------------------------------------
+say "2f. your own SQL assertions — and the hole the derived checks cannot see"
+# ---------------------------------------------------------------------------
+# The fixture carries two policies: tenant_isolation, which is what everybody
+# believes is protecting the table, and reporting_read, which permits app_role to
+# SELECT everything. Permissive policies are OR'd, so the second one silently
+# defeats the first — and every derived check passes, because the restored
+# database's policies are identical to the artefact's. They ARE identical. The
+# database was always like this.
+#
+# Only somebody who knows what app_role is for can ask the question, which is the
+# entire argument for this feature existing.
+
+cat > /work/pack-holds.json <<'JSON'
+{
+  "assertions": [
+    {
+      "key": "the_owner_sees_nothing_for_a_stranger",
+      "title": "with an unknown tenant, the table owner sees no rows at all",
+      "sql": "SELECT count(*) = 0 FROM public.tenant_rows",
+      "as": "source",
+      "settings": { "app.tenant_id": "00000000-0000-0000-0000-000000000000" }
+    },
+    {
+      "key": "the_customers_table_is_not_empty",
+      "title": "the customers table came back with rows in it",
+      "sql": "SELECT count(*) > 0 FROM public.customers"
+    },
+    {
+      "key": "the_protected_table_is_not_empty",
+      "title": "the tenant table came back with rows in it",
+      "sql": "SELECT count(*) > 0 FROM public.tenant_rows"
+    },
+    {
+      "key": "no_customer_carries_the_placeholder_name",
+      "title": "no customer record was left holding a placeholder name",
+      "sql": "SELECT count(*) = 0 FROM public.customers WHERE name = 'zzz-canary-in-the-sql'"
+    }
+  ]
+}
+JSON
+
+HOLDS="$(proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 \
+         --assertions /work/pack-holds.json --json)"
+expect "a pack whose assertions hold is a passed drill" 0 "$?"
+
+# The pair on the SAME forced table is the semantics, asserted rather than
+# described: with no `as`, an assertion asks about the data and sees all 20000
+# rows; with `as`, it becomes that role and the policy hides every one of them.
+# If the exemption survived SET ROLE, the first of these would pass and the
+# second would fail — and this product would be reporting isolation it does not
+# have.
+for key in assertion_the_owner_sees_nothing_for_a_stranger assertion_the_customers_table_is_not_empty \
+           assertion_the_protected_table_is_not_empty assertion_no_customer_carries_the_placeholder_name; do
+  if printf '%s' "$HOLDS" | tr -d ' \n' | grep -q "\"key\":\"$key\",\"outcome\":\"passed\""; then
+    printf '  [pass] %s\n' "$key"
+  else
+    printf '  [FAIL] %s did not pass\n' "$key"
+    FAILURES=$((FAILURES + 1))
+  fi
+done
+
+# The line that used to say "not implemented yet" on every single run.
+if printf '%s' "$HOLDS" | grep -q 'customer SQL assertions: not implemented'; then
+  printf '  [FAIL] the report still says customer assertions are not implemented\n'
+  FAILURES=$((FAILURES + 1))
+else
+  printf '  [pass] no report claims customer assertions are unimplemented\n'
+fi
+
+say "2g. an assertion that does not hold is a FAILED drill"
+cat > /work/pack-fails.json <<'JSON'
+{
+  "assertions": [
+    {
+      "key": "app_role_sees_no_other_tenant",
+      "title": "the application role cannot read another tenant's rows",
+      "sql": "SELECT count(*) = 0 FROM public.tenant_rows",
+      "as": "app_role",
+      "settings": { "app.tenant_id": "00000000-0000-0000-0000-000000000000" }
+    }
+  ]
+}
+JSON
+
+proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 \
+  --assertions /work/pack-fails.json
+expect "an assertion that returns false fails the drill" 1 "$?"
+
+BROKEN="$(proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 \
+          --assertions /work/pack-fails.json --json)"
+
+printf '%s' "$BROKEN" | tr -d ' \n' | grep -q '"key":"assertion_app_role_sees_no_other_tenant","outcome":"failed"'
+expect "and it is that assertion, by name" 0 "$?"
+
+# The whole point, stated as a check: every derived guarantee comparison passes
+# on the same run. The policies came back identical, the RLS statements came back
+# identical, and the application role can still read every tenant's rows.
+for key in rls_enabled_and_forced_preserved policies_identical grants_identical; do
+  printf '%s' "$BROKEN" | tr -d ' \n' | grep -q "\"key\":\"$key\",\"outcome\":\"passed\""
+  expect "$key still passes on the failed drill" 0 "$?"
+done
+
+say "2h. the boundary is the role, and it is the server that holds it"
+cat > /work/pack-bounded.json <<'JSON'
+{
+  "assertions": [
+    {
+      "key": "reading_a_file_from_the_host",
+      "title": "an assertion cannot read a file on the machine the agent runs on",
+      "sql": "SELECT pg_read_file('/etc/hostname') IS NOT NULL"
+    },
+    {
+      "key": "listing_a_directory_on_the_host",
+      "title": "an assertion cannot list a directory on the machine the agent runs on",
+      "sql": "SELECT count(*) > 0 FROM pg_ls_dir('/')"
+    },
+    {
+      "key": "running_as_the_cluster_superuser",
+      "title": "an assertion cannot ask to run as a superuser",
+      "sql": "SELECT true",
+      "as": "proofdrill"
+    },
+    {
+      "key": "asking_for_a_role_that_does_not_exist",
+      "title": "an assertion naming a role the artefact never carried",
+      "sql": "SELECT true",
+      "as": "no_such_role_anywhere"
+    },
+    {
+      "key": "returning_something_that_is_not_a_verdict",
+      "title": "an assertion that returns a number instead of true or false",
+      "sql": "SELECT count(*) FROM public.customers"
+    }
+  ]
+}
+JSON
+
+BOUNDED="$(proofdrill drill --dump-file /work/with-roles.dump --rpo-window-hours 24 \
+           --assertions /work/pack-bounded.json --json)"
+expect "none of the bounded assertions is a verdict, so the drill still passes" 0 "$?"
+
+for key in assertion_reading_a_file_from_the_host assertion_listing_a_directory_on_the_host \
+           assertion_running_as_the_cluster_superuser assertion_asking_for_a_role_that_does_not_exist \
+           assertion_returning_something_that_is_not_a_verdict; do
+  if printf '%s' "$BOUNDED" | tr -d ' \n' | grep -q "\"key\":\"$key\",\"outcome\":\"could_not_attempt\""; then
+    printf '  [pass] %s could not be attempted\n' "$key"
+  else
+    printf '  [FAIL] %s did not come back as could_not_attempt\n' "$key"
+    FAILURES=$((FAILURES + 1))
+  fi
+done
+
+# The privilege refusal is reported as a code and never as PostgreSQL's own
+# sentence, because an error message can quote the row that caused it.
+printf '%s' "$BOUNDED" | grep -q 'SQLSTATE 42501'
+expect "the file read is refused by the server, reported as SQLSTATE 42501" 0 "$?"
+
+printf '%s' "$BOUNDED" | grep -q 'is a superuser in the restored cluster'
+expect "and a superuser is refused by name before anything runs" 0 "$?"
+
+# What must NOT be in the report: the statements themselves. The control plane
+# already has any pack it sent, and a pack from this machine stays on it.
+for text in pg_read_file pg_ls_dir; do
+  if printf '%s' "$BOUNDED" | grep -q "$text"; then
+    printf '  [FAIL] the report carries the assertion SQL: %s\n' "$text"
+    FAILURES=$((FAILURES + 1))
+  else
+    printf '  [pass] the report does not carry the SQL (%s)\n' "$text"
+  fi
+done
+
+# The case that matters most, because it is how a customer's own data ends up
+# inside an assertion in the first place: a literal in the WHERE clause. It is in
+# the pack, it is not in the report, and the report is the thing that leaves.
+if printf '%s' "$HOLDS" | grep -q 'zzz-canary-in-the-sql'; then
+  printf '  [FAIL] a literal from the assertion SQL reached the report\n'
+  FAILURES=$((FAILURES + 1))
+else
+  printf '  [pass] a literal inside an assertion does not reach the report\n'
+fi
+
+# Nor the value of a setting. The report says which parameter was set, never to
+# what: a value is written by the customer and can be anything out of their data.
+if printf '%s' "$HOLDS" | grep -q '00000000-0000-0000-0000-000000000000'; then
+  printf '  [FAIL] the report carries a setting value\n'
+  FAILURES=$((FAILURES + 1))
+else
+  printf '  [pass] the report names app.tenant_id without saying what it was set to\n'
+fi
+
+say "2i. a pack that is wrong is refused before anything is restored"
+printf '{ "assertions": [ { "key": "no_title", "sql": "SELECT true" } ] }' > /work/pack-bad.json
+proofdrill drill --dump-file /work/with-roles.dump --assertions /work/pack-bad.json
+expect "an assertion with no title is a usage error" 64 "$?"
+
+printf 'not json at all' > /work/pack-broken.json
+proofdrill drill --dump-file /work/with-roles.dump --assertions /work/pack-broken.json
+expect "a pack that is not JSON is a usage error" 64 "$?"
+
+proofdrill drill --dump-file /work/with-roles.dump --assertions /work/does-not-exist.json
+expect "a pack that is not there is a usage error" 64 "$?"
 
 # ---------------------------------------------------------------------------
 say "3. a valid archive with no rows must FAIL — the founding failure"
