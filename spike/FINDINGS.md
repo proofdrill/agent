@@ -59,6 +59,28 @@ most of those libraries are shared. What it actually costs has to be measured by
 installing the second major, not extrapolated — extrapolating is what produced
 the wrong number the first time.
 
+### The matrix, measured — 2026-08-12
+
+Built rather than estimated, as the paragraph above insisted:
+
+| | |
+|---|---|
+| one major (17) | **701 MB** |
+| five majors (14, 15, 16, 17, 18) | **946 MB** |
+| cost of the four extra | **245 MB**, about 61 MB each |
+
+So the shared-library guess was right and the size argument against carrying the
+whole supported set does not survive contact with a build: four more majors cost
+less than the single copy of `libLLVM` that is in there for a feature a restore
+never invokes. Dropping LLVM remains the larger win of the two, and is still not
+done.
+
+The image is verified across the whole list rather than at its ends: `verify.sh`
+manufactures a fixture with **each** installed major and drills it, then checks
+the report names that major as the writer. A major that is installed and cannot
+restore would otherwise be a lie told in the one message a customer reads when
+their drill did not happen.
+
 ## 2. The finding: a plain `pg_dump` does not carry the authorization model
 
 The source table had `ENABLE` **and** `FORCE ROW LEVEL SECURITY`, a policy, and

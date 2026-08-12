@@ -674,6 +674,47 @@ proofdrill drill --dump-file /work/with-roles.dump --not-an-option 1
 expect "an unknown option is refused rather than ignored" 64 "$?"
 
 # ---------------------------------------------------------------------------
+say "6a. the other half of that refusal: a major this image DOES carry"
+# ---------------------------------------------------------------------------
+# The check above proves the agent says no to a major it lacks. On its own that
+# is satisfied by an agent that says no to everything except the newest thing
+# installed — which is exactly the defect a multi-major image exists to remove,
+# and the one every other fixture here is blind to, because they are all written
+# by the newest major.
+#
+# So: an artefact written by the OLDEST major in the image, drilled with no
+# --pg-major at all. It passes only if the agent read the version out of the
+# archive's own table of contents and reached for those binaries.
+MAJORS="$(ls /usr/lib/postgresql | sort -n)"
+NEWEST_MAJOR="$(printf '%s' "$MAJORS" | tail -1)"
+note "this image carries: $(printf '%s' "$MAJORS" | tr '\n' ' ')"
+
+# EVERY major, not the two ends. The image's claim is a list, the refusal above
+# quotes that list back to the customer, and a major that is installed but
+# cannot actually drill would be a lie told in the one message a customer reads
+# when their drill did not happen. Each pass costs an initdb, a 20 000 row
+# insert and a dump — seconds — which is cheap for the only check that covers
+# what the packaging promises.
+for major in $MAJORS; do
+  PG_MAJOR="$major" /usr/local/bin/make-fixture.sh "/work/major-${major}.dump"
+  REPORT="$(proofdrill drill --dump-file "/work/major-${major}.dump" --rpo-window-hours 24 --json)"
+  expect "an artefact from PostgreSQL ${major} drills (newest here is ${NEWEST_MAJOR})" 0 "$?"
+
+  # And the report says which server wrote it. A customer reading a report about
+  # a database they did not restore themselves has no other way to tell that the
+  # matching binaries were used — and "it restored" is exactly what a mismatched
+  # pg_restore can also say, right up to the parts it silently did not bring.
+  if printf '%s' "$REPORT" | tr -d ' \n' | grep -q "\"postgresMajor\":${major}"; then
+    printf '  [pass] the report names PostgreSQL %s as the writer\n' "$major"
+  else
+    printf '  [FAIL] the report does not name PostgreSQL %s as the writer\n' "$major"
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  rm -f "/work/major-${major}.dump"
+done
+
+# ---------------------------------------------------------------------------
 say "6b. the protocol, judged by openssl and not by us"
 # ---------------------------------------------------------------------------
 export PROOFDRILL_TOKEN=rh_agt_verification_token

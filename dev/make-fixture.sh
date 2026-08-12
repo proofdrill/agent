@@ -11,7 +11,17 @@ set -euo pipefail
 DESTINATION="${1:?usage: make-fixture.sh <destination.dump> [globals.sql]}"
 GLOBALS="${2:-}"
 
-PG_MAJOR="$(ls /usr/lib/postgresql | sort -n | tail -1)"
+# Which major writes the fixture, overridable because the image carries several.
+#
+# A drill picks its binaries from what the ARTEFACT says wrote it, never from
+# what is newest. The only way to prove that is to hand it an artefact written
+# by something other than the newest thing installed — with the default, "it
+# chose correctly" and "it chose the last one" are the same observation, and a
+# regression that made the agent always reach for the newest major would pass
+# every check here.
+PG_MAJOR="${PG_MAJOR:-$(ls /usr/lib/postgresql | sort -n | tail -1)}"
+test -x "/usr/lib/postgresql/${PG_MAJOR}/bin/initdb" \
+  || { echo "this image does not carry PostgreSQL ${PG_MAJOR}" >&2; exit 1; }
 export PATH="/usr/lib/postgresql/${PG_MAJOR}/bin:${PATH}"
 
 DATA=/tmp/fixture/pgdata

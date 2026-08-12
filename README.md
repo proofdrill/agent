@@ -78,6 +78,25 @@ These are constraints on the design, not aspirations:
 - **It cleans up after itself**, including after a failure, and runs under
   explicit resource limits. It is running on your machine, not ours.
 
+## Which PostgreSQL versions
+
+**14, 15, 16, 17 and 18 — every major upstream still supports, in one image.**
+You do not choose. `pg_restore` has to match the major that wrote the archive,
+so the agent reads that out of the archive's own table of contents and reaches
+for those binaries. There is no tag per version and nothing to configure: asking
+you which major wrote last night's dump would be asking you, at install time,
+one of the questions you installed this to have answered.
+
+If an archive was written by a major that is not in that list, the drill stops
+before restoring anything and says so, naming the versions this image does carry.
+It is reported as *could not be attempted* — a correction, never a verdict about
+your backup. Restoring across majors is not a restore, and a report built on one
+would be worth less than no report.
+
+The image is **linux/amd64**. arm64 is not published, because no drill has been
+run on it here and an unverified image is not something to put inside somebody
+else's perimeter.
+
 ## Running it
 
 Against a file you already have, with no account and no network:

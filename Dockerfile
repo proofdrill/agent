@@ -31,7 +31,26 @@ RUN dotnet publish src/Proofdrill.Agent/Proofdrill.Agent.csproj \
 
 FROM mcr.microsoft.com/dotnet/runtime:10.0@sha256:68d35011fe04a39cca38208d392ed48f2df15653633dca16dbc4582d07342b9f AS agent
 
-ARG PG_MAJOR=17
+# EVERY MAJOR STILL SUPPORTED UPSTREAM, IN ONE IMAGE, AND ON PURPOSE.
+#
+# pg_restore must match the major that wrote the archive — restoring across
+# majors is not a restore, and PostgresBinaries.For() returns null rather than
+# reaching for the nearest one. So an image carrying a single major serves only
+# the customers who happen to run it, and answers every other one with a
+# correction. A backup verification product that cannot verify your backup
+# because of our packaging is not a product.
+#
+# The alternative was a tag per major — agent:1-pg16 — and it is rejected for
+# the reason the whole onboarding is built on: step 4 is ONE paste. A customer
+# who has to know which major wrote their nightly dump before they can choose an
+# image is a customer answering, at install time, the question they installed
+# this to have answered. The agent reads it out of the artefact instead.
+#
+# The list is upstream's supported set. A major that upstream has stopped
+# patching is one we would be carrying into other people's infrastructure long
+# after its last security fix, and the refusal an unsupported major gets names
+# what is here — which is a better answer than a stale binary.
+ARG PG_MAJORS="14 15 16 17 18"
 
 RUN set -eux; \
     apt-get update; \
@@ -42,9 +61,23 @@ RUN set -eux; \
     echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
       > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}"; \
+    packages=""; \
+    for major in ${PG_MAJORS}; do packages="${packages} postgresql-${major}"; done; \
+    # Unquoted on purpose: the list is several package names, not one.
+    # shellcheck disable=SC2086
+    apt-get install -y --no-install-recommends ${packages}; \
     apt-get purge -y --auto-remove curl gnupg; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    # Asserted here rather than discovered by a customer whose drill returns a
+    # correction. PGDG does not necessarily build every major for every Debian
+    # release, and `apt-get install` of a package that does not exist fails
+    # loudly — but a major that resolves to an EMPTY bin directory would not,
+    # and AvailableMajors() would simply not list it. The image says what it
+    # carries, at build time, or it does not build.
+    for major in ${PG_MAJORS}; do \
+      test -x "/usr/lib/postgresql/${major}/bin/initdb" \
+        || { echo "PostgreSQL ${major} has no initdb: this image would silently not carry it" >&2; exit 1; }; \
+    done
 
 # postgres refuses to run as root, which makes "no privileged access" enforced by
 # the software rather than promised by us.

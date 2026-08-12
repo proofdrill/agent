@@ -41,7 +41,11 @@ jobs:
   drill:
     name: A real restore, in the real image
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Raised from 20 with the multi-major image: five PostgreSQL majors to
+    # install on a cold cache, and a drill run for each of them, because a major
+    # the image installs and cannot restore with would be a lie told in the one
+    # message a customer reads when their drill did not happen.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
