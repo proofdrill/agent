@@ -38,12 +38,29 @@ answer the first time they are asked.
 ## 2. How to produce one
 
 ```bash
-pg_dumpall --globals-only --no-role-passwords -h HOST -U USER > globals-$(date +%F).sql
+pg_dumpall --globals-only --no-role-passwords -l DBNAME -h HOST -U USER > globals-$(date +%F).sql
 ```
 
 Put it in the same bucket and under the same prefix as the backup, on the same
 schedule, and name it in the target's globals pattern — `globals-*.sql`. It is a
 few kilobytes; the cost of writing one nightly is nothing.
+
+**`-l DBNAME` is what makes this work on a managed provider**, and it is the
+step most people hit first. `pg_dumpall` has to connect somewhere before it can
+read anything cluster-wide, and left to itself it opens `postgres`, falling back
+to `template1`. On a hosted PostgreSQL your role often may not open either:
+
+```
+pg_dumpall: error: connection to server at "..." failed:
+FATAL:  pg_hba.conf rejects connection for host "...", user "...",
+        database "template1", SSL encryption
+```
+
+That message names a database you did not ask for and a file you have never
+edited, so it reads as a firewall problem or a wrong password. It is neither.
+`-l` points it at a database your role can already open — the one you are backing
+up will do — and the roles it reads are the same either way, because roles are
+cluster-wide and do not belong to the database you happened to connect through.
 
 **`--no-role-passwords` is the recommendation and not a detail.** Without it,
 `pg_dumpall` reads `pg_authid` and writes every role's password verifier into the

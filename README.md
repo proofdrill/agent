@@ -124,8 +124,14 @@ every policy you wrote"* is invisible. One command produces it, and it does not
 need a superuser:
 
 ```
-pg_dumpall --globals-only --no-role-passwords -h HOST -U USER > globals-$(date +%F).sql
+pg_dumpall --globals-only --no-role-passwords -l DBNAME -h HOST -U USER > globals-$(date +%F).sql
 ```
+
+`-l DBNAME` names a database your role can already open — the one you are backing
+up will do. Without it `pg_dumpall` opens `postgres`, or `template1`, and a
+managed provider will often refuse your role on both with a message about a
+`pg_hba.conf` you cannot see. The roles it reads are the same either way, because
+roles are cluster-wide.
 
 [`protocol/v1/GLOBALS.md`](protocol/v1/GLOBALS.md) says exactly what the agent
 applies out of that file and what it refuses — the file is read, never executed.
