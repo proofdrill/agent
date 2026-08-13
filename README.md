@@ -1,3 +1,17 @@
+<p align="center">
+  <picture>
+    <!-- "Proof" is near-black navy and vanishes on a dark README; the dark
+         variant repaints it white. "drill" is blue into cyan and reads on both. -->
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-dark.png" />
+    <img src="docs/brand/logo-light.png" alt="Proofdrill" width="426" />
+  </picture>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-0134d8" /></a>
+  <img alt="ghcr.io/proofdrill/agent" src="https://img.shields.io/badge/ghcr.io-proofdrill%2Fagent-0134d8" />
+</p>
+
 # Proofdrill agent
 
 > **Status: first release.** The image is published, and the control plane it
