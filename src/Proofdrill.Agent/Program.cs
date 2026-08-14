@@ -301,7 +301,19 @@ StorageOptions StorageFrom(CommandLine command)
 // backup and the roles the backup's objects belong to — and reading the bucket
 // twice would let the two halves come from either side of a nightly job that
 // wrote them.
-async Task<(string Artefact, GlobalsArtefact? Globals, string? Note)> FetchAsync(
+// WrittenAt is the stored object's own timestamp and it is returned rather than
+// left behind, which it was until 1.0.2. The artefact is downloaded to a file
+// whose mtime is the moment of the download, so a drill that read the file's
+// mtime measured how long ago it fetched the backup — always about zero — and
+// called it the RPO. `measuredRpoSeconds` was 0 on every drill that took its
+// artefact from storage, and `artefact_within_rpo_window` could not fail, which
+// is the check that exists to catch a backup job that stopped running.
+//
+// The globals artefact carried its real timestamp all along, twenty-five lines
+// below, and that asymmetry is what made the defect visible from a report alone:
+// two objects uploaded nine seconds apart were described as an hour and a half
+// apart, because one age was true and the other was the download.
+async Task<(string Artefact, DateTimeOffset WrittenAt, GlobalsArtefact? Globals, string? Note)> FetchAsync(
     StorageOptions storage,
     string? globalsPattern,
     string workRoot,
@@ -327,13 +339,13 @@ async Task<(string Artefact, GlobalsArtefact? Globals, string? Note)> FetchAsync
 
     if (globalsPattern is not { Length: > 0 })
     {
-        return (destination, null, null);
+        return (destination, artefact.LastModified, null, null);
     }
 
     var globals = ArtefactLocator.Newest(listed, globalsPattern);
     if (globals is null)
     {
-        return (destination, null,
+        return (destination, artefact.LastModified, null,
             $"Nothing under '{storage.Prefix}' in '{storage.Bucket}' matches the globals pattern " +
             $"'{globalsPattern}' this drill was given, so there was no second artefact to read the roles from.");
     }
@@ -344,7 +356,7 @@ async Task<(string Artefact, GlobalsArtefact? Globals, string? Note)> FetchAsync
     const long GlobalsCeiling = 16L << 20;
     if (globals.SizeBytes > GlobalsCeiling)
     {
-        return (destination, null,
+        return (destination, artefact.LastModified, null,
             $"'{globals.Key}' matches the globals pattern '{globalsPattern}' and is {globals.SizeBytes} bytes. A " +
             "pg_dumpall --globals-only artefact is a few kilobytes of CREATE ROLE statements, so this was left " +
             "where it is rather than downloaded: the pattern is matching something else in the bucket.");
@@ -354,7 +366,7 @@ async Task<(string Artefact, GlobalsArtefact? Globals, string? Note)> FetchAsync
     Console.Error.WriteLine($"proofdrill: fetching {globals.Key} ({globals.SizeBytes} bytes)");
     await client.GetAsync(globals, globalsPath, GlobalsCeiling, cancellationToken).ConfigureAwait(false);
 
-    return (destination, new GlobalsArtefact(
+    return (destination, artefact.LastModified, new GlobalsArtefact(
         globalsPath, Name(globals.Key), globals.SizeBytes, globals.LastModified), null);
 }
 
@@ -401,6 +413,10 @@ async Task<int> DrillAsync(CommandLine command, CancellationToken cancellationTo
     GlobalsArtefact? globals;
     string? note;
 
+    // Null for --dump-file, and correct there: a file somebody points at was not
+    // downloaded, so its mtime is the artefact's own. The drill falls back to it.
+    DateTimeOffset? artefactWrittenAt = null;
+
     if (command.Value("--dump-file") is { } local)
     {
         (artefactPath, globals, note) = (local, localGlobals, null);
@@ -418,6 +434,7 @@ async Task<int> DrillAsync(CommandLine command, CancellationToken cancellationTo
             .ConfigureAwait(false);
 
         (artefactPath, globals, note) = (fetched.Artefact, localGlobals ?? fetched.Globals, fetched.Note);
+        artefactWrittenAt = fetched.WrittenAt;
     }
 
     var options = new DrillOptions(
@@ -426,6 +443,7 @@ async Task<int> DrillAsync(CommandLine command, CancellationToken cancellationTo
         DryRun: command.Has("--dry-run"),
         WorkRoot: workRoot,
         RpoWindowHours: command.Number("--rpo-window-hours"),
+        ArtefactWrittenAt: artefactWrittenAt,
         Assertions: pack,
         Globals: globals,
         GlobalsNote: note ??
@@ -591,6 +609,7 @@ async Task RunOneAsync(
                 DryRun: false,
                 WorkRoot: workRoot,
                 RpoWindowHours: job.RpoWindowHours,
+                ArtefactWrittenAt: fetched.WrittenAt,
                 Assertions: assertions,
                 Globals: fetched.Globals,
                 GlobalsNote: fetched.Note ?? GlobalsNote(job.Globals)),

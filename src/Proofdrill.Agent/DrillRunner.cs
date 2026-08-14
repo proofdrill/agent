@@ -16,6 +16,15 @@ internal sealed record DrillOptions(
     bool DryRun,
     string WorkRoot,
     double? RpoWindowHours,
+    /// <summary>
+    /// When the artefact was written, as the place it came from records it —
+    /// never as the local file claims. A downloaded artefact has an mtime of the
+    /// download, so reading the file would measure how long ago this agent
+    /// fetched the backup and report it as the RPO. Null for <c>--dump-file</c>,
+    /// where the file somebody pointed at was not downloaded and its mtime is
+    /// the artefact's own.
+    /// </summary>
+    DateTimeOffset? ArtefactWrittenAt = null,
     AssertionPack? Assertions = null,
     GlobalsArtefact? Globals = null,
     string? GlobalsNote = null);
@@ -34,6 +43,28 @@ internal sealed record AppliedGlobals(IReadOnlyList<DeclaredRole> Roles, IReadOn
 /// </summary>
 internal static partial class DrillRunner
 {
+    /// <summary>
+    /// When the artefact was written, which is the whole of the measured RPO.
+    /// <para>
+    /// The storage's own timestamp when there is one, and the local file's only
+    /// when there is not. It has a name and a test because getting it the other
+    /// way round is not visibly wrong: a downloaded artefact has an mtime of the
+    /// download, so reading the file measures how long ago this agent fetched the
+    /// backup — a few seconds, always — and reports it as the age of the backup.
+    /// </para>
+    /// <para>
+    /// <b>That was the behaviour until 1.0.2.</b> It failed in the direction
+    /// nothing catches: <c>measuredRpoSeconds</c> was near zero on every drill
+    /// that took its artefact from storage, and <c>artefact_within_rpo_window</c>
+    /// could not fail — which is the check that exists to notice a backup job
+    /// that stopped running three weeks ago.
+    /// </para>
+    /// Null is <c>--dump-file</c>, and the file's mtime is right there: nobody
+    /// downloaded it, so it is the artefact's own.
+    /// </summary>
+    internal static DateTimeOffset WrittenAt(DrillOptions options, FileInfo file) =>
+        options.ArtefactWrittenAt ?? new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero);
+
     private const string RestoredDatabase = "restored";
 
     /// <summary>
@@ -118,7 +149,7 @@ internal static partial class DrillRunner
                 "the failure this product was built for, but an empty file cannot be drilled.");
         }
 
-        var lastModified = new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero);
+        var lastModified = WrittenAt(options, file);
         var ageHours = (startedAt - lastModified).TotalHours;
 
         var available = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(options.WorkRoot)) ?? "/").AvailableFreeSpace;
