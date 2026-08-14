@@ -14,6 +14,16 @@ name: Release
 # still supports and the agent chooses by reading the archive's own table of
 # contents. A tag per major would make the customer answer, at install time, the
 # question they installed this to have answered.
+#
+# A COMMIT IN `ref` MEANS ALL FORTY CHARACTERS. `actions/checkout` resolves a ref
+# by pattern — `refs/heads/<ref>*` and `refs/tags/<ref>*` — so the short SHA every
+# other tool here accepts matches no branch and no tag: the fetch comes back
+# empty and the step fails with `The process '/usr/bin/git' failed with exit code
+# 1`, saying nothing about the ref. It cost a wasted dispatch in the control
+# plane on 2026-08-14, whose Release workflow takes the same input and now
+# carries the same warning. Written in both on purpose: the trap belongs to
+# `checkout` rather than to either workflow, and a warning kept in one repository
+# is one the other repository's dispatcher never reads.
 
 on:
   workflow_dispatch:
@@ -22,7 +32,7 @@ on:
         description: "Version to publish, semver, e.g. 1.0.0 — no leading v"
         required: true
       ref:
-        description: "Commit, branch or tag to build"
+        description: "Branch, tag, or FULL 40-character commit SHA (a short SHA is not resolvable)"
         required: false
         default: main
 
