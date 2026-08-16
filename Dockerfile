@@ -92,6 +92,22 @@ RUN ln -s /opt/proofdrill/proofdrill /usr/local/bin/proofdrill
 USER drill
 WORKDIR /work
 
+# This image says, in the image, that it is one.
+#
+# The agent reports a hostname, and inside a container `Environment.MachineName`
+# is the CONTAINER ID unless somebody passed --hostname. That value looks like
+# the one field identifying which machine to go and restart, and it is the one
+# field that does not survive `docker run`: recreate the container and the same
+# physical box reports a different name. So the agent has to know when its own
+# machine name is worthless and say so.
+#
+# Declared here rather than sniffed at runtime — no /.dockerenv, no reading
+# /proc/1/cgroup. Those are guesses about somebody else's runtime that are wrong
+# on Podman, on Kubernetes and on whatever is next; this is true by construction,
+# because we are the ones who build the image. A copy of the binary running
+# outside a container never sees it, which is exactly right.
+ENV PROOFDRILL_IN_CONTAINER=1
+
 # The subcommand is what the customer types after the image name, exactly as the
 # installation page shows it: `docker run … ghcr.io/proofdrill/agent:1 drill …`.
 ENTRYPOINT ["/usr/local/bin/proofdrill"]

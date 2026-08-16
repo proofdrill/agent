@@ -52,6 +52,15 @@ the registration token. The token therefore never travels, on this call either.
 registration. A hostname is not an id: the control plane resolves an organisation
 from this value, and anything that is not a registered id is refused.
 
+`agent.hostname` is display only — it is what the control plane shows beside the
+name you chose, and what the "this agent has stopped reporting" e-mail puts in
+brackets so somebody knows which machine to go to. **Inside a container it
+defaults to the container id**, which changes every time the container is
+recreated, so set `PROOFDRILL_HOSTNAME` to the host's own name; the installation
+command the control plane hands you does this with `$(hostname)`, and the agent
+says so at startup when it is running in a container without one. Nothing is
+decided from this field, by us or by you.
+
 ### 2.1 `requestedAt`, and why a request needs one
 
 A signed document cannot usefully be replayed — it says what it says. A signed

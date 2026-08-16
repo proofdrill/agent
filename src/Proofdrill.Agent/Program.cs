@@ -510,7 +510,11 @@ async Task<int> RunAsync(CommandLine command, CancellationToken cancellationToke
     var localPack = LocalAssertions(command);
     var token = ReportEnvelope.Token();
     var agentId = RegisteredAgentId(command);
-    var identity = new AgentIdentity(agentId, DrillRunner.AgentVersion(), Environment.MachineName);
+    var identity = new AgentIdentity(agentId, DrillRunner.AgentVersion(), Hostname());
+
+    // Before the loop, not inside it: this is a fact about how the container was
+    // started, so saying it once is saying it as often as it is true.
+    WarnAboutContainerHostname();
 
     using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
 
@@ -825,7 +829,59 @@ static AssertionPack Assertions(AssignedJob job, AssertionPack local, bool refus
 }
 
 static AgentIdentity Identity(CommandLine command) =>
-    new(AgentId(command), DrillRunner.AgentVersion(), Environment.MachineName);
+    new(AgentId(command), DrillRunner.AgentVersion(), Hostname());
+
+/// <summary>
+/// Which machine this is, for the screen and for the e-mail that tells somebody
+/// to go and look at it.
+/// <para>
+/// <c>Environment.MachineName</c> inside a container is the <b>container id</b>,
+/// and that is worse than useless in the one place this value is read: it looks
+/// like the field naming the box to restart, and it is the only field that does
+/// not survive <c>docker run</c> — recreate the container and the same physical
+/// machine reports a different name. So an explicit value wins, and the
+/// installation command sets one.
+/// </para>
+/// <para>
+/// It still falls back to the machine name in a container, and the protocol is
+/// why: <c>hostname</c> is <c>required</c> and typed <c>string</c> in the v1
+/// report schema, which is a published document with a declared support window,
+/// and a container id is not worth a version 2 of it. What the agent does
+/// instead is <em>say</em> that the value is poor, once, at startup — see
+/// <c>WarnAboutContainerHostname</c>. The right fix is one flag on the run
+/// command, and the warning is where somebody will actually meet it.
+/// </para>
+/// </summary>
+static string Hostname() =>
+    Environment.GetEnvironmentVariable("PROOFDRILL_HOSTNAME") is { Length: > 0 } explicitName
+        ? explicitName.Trim()
+        : Environment.MachineName;
+
+/// <summary>
+/// Said once, at startup, and only when it is true: this container is about to
+/// report a name that identifies nothing.
+/// <para>
+/// A warning rather than a refusal. Refusing to start over a cosmetic field
+/// would break every hand-written compose file in exchange for a nicer line in
+/// an e-mail, and this agent's whole contract is that it is dull and does not
+/// surprise the machine it runs on.
+/// </para>
+/// </summary>
+static void WarnAboutContainerHostname()
+{
+    if (Environment.GetEnvironmentVariable("PROOFDRILL_IN_CONTAINER") is null
+        || Environment.GetEnvironmentVariable("PROOFDRILL_HOSTNAME") is { Length: > 0 })
+    {
+        return;
+    }
+
+    Console.Error.WriteLine(
+        $"proofdrill: reporting hostname '{Environment.MachineName}', which is this container's id and "
+        + "changes every time the container is recreated.");
+    Console.Error.WriteLine(
+        "proofdrill: add -e PROOFDRILL_HOSTNAME=$(hostname) so the agents screen names a machine "
+        + "somebody can go to.");
+}
 
 // The machine name is a fallback for a drill run by hand with nowhere to report
 // — it identifies the report on the terminal and nothing more.
