@@ -108,6 +108,25 @@ WORKDIR /work
 # outside a container never sees it, which is exactly right.
 ENV PROOFDRILL_IN_CONTAINER=1
 
+# WHAT THE REGISTRY PAGE SHOWS, AND WHY IT IS A PRODUCT CONCERN.
+#
+# `image.source` is not documentation: GHCR uses it to link a package to a
+# repository, and until it is set the package page for this image shows a pull
+# command, no README, no licence and no way back to the code. This agent is the
+# distribution channel and the first promise it makes is that you can read it
+# before you run it — so an unlinked package page breaks the promise at the
+# first place somebody meets it.
+#
+# `image.description` is what that page shows above the fold, and it is the one
+# sentence that has to say the data does not move.
+LABEL org.opencontainers.image.source="https://github.com/proofdrill/agent" \
+      org.opencontainers.image.url="https://proofdrill.g1ga.it" \
+      org.opencontainers.image.documentation="https://github.com/proofdrill/agent#readme" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="Proofdrill" \
+      org.opencontainers.image.title="Proofdrill agent" \
+      org.opencontainers.image.description="Restores your PostgreSQL backup into a throwaway cluster on your own machines, checks that the restored database still enforces what the original enforced, and sends back only a signed report. Your data does not move."
+
 # The subcommand is what the customer types after the image name, exactly as the
 # installation page shows it: `docker run … ghcr.io/proofdrill/agent:1 drill …`.
 ENTRYPOINT ["/usr/local/bin/proofdrill"]

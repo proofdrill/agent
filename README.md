@@ -202,6 +202,24 @@ The same check is three lines of `openssl` in §6 of the protocol, because an
 auditor who has to install our tool in order to check our attestation has been
 given an attestation about an attestation.
 
+## When it does not work
+
+Two places, and the difference is whether the answer belongs in public.
+
+**[Open an issue](https://github.com/proofdrill/agent/issues)** for anything
+about the agent itself: a restore that fails on an artefact you can describe, a
+PostgreSQL major or an extension it does not carry, a message that told you
+nothing. Those answers are worth more where the next person can find them.
+
+**Write to <proofdrill@g1ga.it>** for anything you would not put in a public
+thread — something about your own infrastructure, an account, or a report you
+would rather not paste. It is also the address for the sentence this project was
+built after: *this happened to us*. That one we want to hear.
+
+A useful report of a failed drill is the command you ran with the credentials
+removed, what the agent printed, and the PostgreSQL major that wrote the
+archive. `proofdrill doctor` collects most of it and prints nothing secret.
+
 ## Licence
 
 See [LICENSE](LICENSE).
