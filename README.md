@@ -178,6 +178,17 @@ until you decide otherwise. Pin `:1.0.0` if you would rather say when. There is
 no `latest`, deliberately — it is the tag people use when they have not thought
 about versions, and this runs in your production network.
 
+For an agent that stays up rather than one you run by hand, there is
+[`deploy/compose.yaml`](deploy/compose.yaml) and its
+[`env.example`](deploy/env.example). It is the same file we run ourselves. A
+`docker run` line is the right shape for the first five minutes and the wrong
+one for the next two years: the container it creates holds its whole
+configuration in its own process table and nowhere else, so updating it means
+reconstructing the command out of `docker inspect` and trusting the
+reconstruction. Updating from the compose file is `pull` and then `up -d` — two
+commands, because `up -d` alone will not fetch a tag that has moved, and when
+this software changes is your decision rather than ours.
+
 ## The report, and the two signatures on it
 
 What leaves your perimeter is defined in [`protocol/v1`](protocol/v1/PROTOCOL.md)
