@@ -116,7 +116,33 @@ services:
 #     --format '{{range .Config.Env}}{{println .}}{{end}}' \
 #     | grep '^PROOFDRILL_'
 #
-# Put those values into your environment file, `chmod 600` it, then:
+# Put those values into your environment file, and double any literal `$` on the
+# way in — what `docker inspect` prints is the real value, and compose will
+# interpolate a `$` it finds in an --env-file. See env.example.
+#
+# Then restrict the file, and READ THE PERMISSIONS BACK before going on:
+#
+#   chmod 600 <your env> && ls -l <your env>
+#
+# On Windows the equivalent is `icacls`, and it is where we lost this the first
+# time:
+#
+#   icacls <your env> /inheritance:r /grant:r "${env:USERNAME}:(R,W)"
+#   icacls <your env>
+#
+# `"$env:USERNAME:(R,W)"` — the spelling that looks right — fails, because
+# PowerShell's `env:` provider path swallows the second colon. That is a typo and
+# not worth a paragraph. **What is worth one is how it failed**: icacls rejected
+# the whole command, so the environment file was already on disk, still
+# inheriting, readable by every local user — and the only output was a complaint
+# about a parameter. The step that wrote a secret succeeded and the step that
+# protected it did not, and nothing said so.
+#
+# So the second `icacls`, and the `ls -l`, are the point rather than the
+# ceremony. A command that printed one error has not necessarily printed all of
+# them.
+#
+# Then, and only then:
 #
 #   docker rm -f proofdrill-agent
 #   docker compose -f deploy/compose.yaml --env-file <your env> up -d
@@ -125,6 +151,15 @@ services:
 # token goes, and a registration token cannot be recovered — only replaced, by
 # registering a new agent, which is a new row and a new identity on the agents
 # screen.
+#
+# Worth doing before the removal, because it costs nothing and the alternative is
+# discovering it afterwards:
+#
+#   docker compose -f deploy/compose.yaml --env-file <your env> config >/dev/null
+#
+# Exit 0 means every required value is present and the file parses. It prints
+# nothing, which is deliberate: `config` without the redirect writes your token
+# to the terminal.
 #
 # ---------------------------------------------------------------------------
 # WHAT IS NOT HERE, ON PURPOSE
