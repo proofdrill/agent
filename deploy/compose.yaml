@@ -1,0 +1,139 @@
+# The agent, as something with a home rather than an argv somebody typed once.
+#
+#   docker compose -f deploy/compose.yaml --env-file /etc/proofdrill-agent/env up -d
+#
+# The registration page hands over a `docker run` line because the design work
+# there is reducing the first install to ONE paste. That is right for the first
+# five minutes and wrong for the next two years: a container created that way
+# holds its whole configuration in its own process table and nowhere else, so
+# updating it means reconstructing the command from `docker inspect` and hoping
+# the reconstruction is faithful. This file is that command, written down.
+#
+# It is the same file we run ourselves. Our own agent was recreated by hand on
+# 2026-08-18 to pick up 1.2.0, and the awkwardness of doing that is why this
+# exists.
+#
+# ---------------------------------------------------------------------------
+# UPDATING, AND WHY IT IS TWO COMMANDS AND NOT ONE
+# ---------------------------------------------------------------------------
+#
+#   docker compose -f deploy/compose.yaml --env-file <your env> pull
+#   docker compose -f deploy/compose.yaml --env-file <your env> up -d
+#
+# `up -d` on its own will NOT fetch a newer image, even when the tag has moved:
+# Docker does not re-pull a tag it already has. That is promise 5 of the README
+# working exactly as written — this software does not update itself — and it is
+# not a wrinkle to design around. `pull_policy: always` is deliberately NOT set
+# here, because it would turn every `up` into an update and hand the decision
+# back to whoever last ran a command instead of leaving it with you.
+#
+# The cost is real and worth stating: an agent installed today keeps running the
+# image it has until a person types those two lines. Nothing will remind you.
+
+name: proofdrill-agent
+
+services:
+  agent:
+    # `:1` moves with each release inside major 1. Pin `1.2.0` in the environment
+    # file if you would rather say when — the tag is the whole of the update
+    # policy, and there is no `latest` to fall into by accident.
+    image: ghcr.io/proofdrill/agent:${PROOFDRILL_IMAGE_TAG:-1}
+
+    # The same name the `docker run` line uses, so a machine that already has one
+    # can be moved onto this file without the agent changing identity on the
+    # agents screen. Compose will NOT adopt a container it did not create,
+    # though: remove the old one first. See MIGRATING below.
+    container_name: proofdrill-agent
+
+    restart: unless-stopped
+
+    # No Docker socket, no privileged mode, every capability dropped. The agent
+    # starts its own PostgreSQL as a child process — spike 0 measured that
+    # arrangement before any of this existed — so nothing here is a concession
+    # it needs back later. If a future version asks for one of these, that is a
+    # product change and this line is where it stops being quiet.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # Outbound only. No `ports:`, and none is needed: the agent asks the control
+    # plane for work and nothing ever asks the agent for anything. That is the
+    # sentence that ends the conversation with whoever runs the firewall, and an
+    # empty ports list is how it stays true.
+    command:
+      - run
+      - --control-plane
+      - ${PROOFDRILL_CONTROL_PLANE:?the origin you signed up at, e.g. https://api.proofdrill.example}
+
+    # EVERY VALUE ENUMERATED, AND EVERY ONE OF THEM REQUIRED.
+    #
+    # `:?` rather than `:-`, so a missing value stops the container instead of
+    # starting one that behaves almost correctly. The control plane learned this
+    # the expensive way with a defaulted `${SMTP_REPLY_TO:-}`: an empty value was
+    # legal by construction, so the deployment came up healthy and sent letters
+    # nobody could reply to, and nothing anywhere said so. An agent with no token
+    # would fail the same shape — running, polling, refused in a silence that
+    # looks like quiet.
+    environment:
+      PROOFDRILL_AGENT_ID: ${PROOFDRILL_AGENT_ID:?from the registration page, shown once}
+      PROOFDRILL_TOKEN: ${PROOFDRILL_TOKEN:?from the registration page, shown once and never again}
+      PROOFDRILL_S3_ACCESS_KEY_ID: ${PROOFDRILL_S3_ACCESS_KEY_ID:?a READ-ONLY key for your backup storage}
+      PROOFDRILL_S3_SECRET_ACCESS_KEY: ${PROOFDRILL_S3_SECRET_ACCESS_KEY:?the secret for that key}
+
+      # REQUIRED HERE, THOUGH THE AGENT ONLY WARNS ABOUT IT.
+      #
+      # `Environment.MachineName` inside a container is the CONTAINER ID, and
+      # that is the field the agents screen and the "your agent has stopped
+      # reporting" e-mail show as the box to go and restart. It is also the only
+      # field that does not survive a recreation: same machine, new name.
+      #
+      # The `docker run` line writes `$(hostname)` and lets the customer's shell
+      # answer. Compose has no shell — `$(hostname)` here is four literal
+      # characters — so the name is written out once, by hand, which is the
+      # honest version of the same thing.
+      PROOFDRILL_HOSTNAME: ${PROOFDRILL_HOSTNAME:?the name of THIS machine, written out - compose has no shell to ask}
+
+    # A drill restores a whole database and says so at length, on somebody else's
+    # disk, for as long as this runs. Unbounded json-file logging is how a dull
+    # background process fills a production volume six months later and gets
+    # blamed for something else.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+# ---------------------------------------------------------------------------
+# MIGRATING an agent that was started with `docker run`
+# ---------------------------------------------------------------------------
+#
+# The token is shown ONCE at registration and there is no endpoint that returns
+# it again, so the only copy on a machine whose agent was started by hand is
+# inside the running container. Read it out BEFORE removing anything:
+#
+#   docker inspect proofdrill-agent \
+#     --format '{{range .Config.Env}}{{println .}}{{end}}' \
+#     | grep '^PROOFDRILL_'
+#
+# Put those values into your environment file, `chmod 600` it, then:
+#
+#   docker rm -f proofdrill-agent
+#   docker compose -f deploy/compose.yaml --env-file <your env> up -d
+#
+# In that order and not the other one. `docker rm` is where the last copy of the
+# token goes, and a registration token cannot be recovered — only replaced, by
+# registering a new agent, which is a new row and a new identity on the agents
+# screen.
+#
+# ---------------------------------------------------------------------------
+# WHAT IS NOT HERE, ON PURPOSE
+# ---------------------------------------------------------------------------
+#
+# No volume on /work. The image creates it, owns it as the unprivileged `drill`
+# user, and every drill cleans up after itself on success, on failure, on an
+# exception and on a signal — so the restore lives in the container's own
+# writable layer and leaves nothing behind. Mount a named volume there if your
+# storage driver makes that expensive, and give it the same owner; the disk
+# headroom check reads whichever filesystem /work lands on and will tell you
+# before a restore starts rather than half way through.
