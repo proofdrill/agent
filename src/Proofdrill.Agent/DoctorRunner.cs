@@ -9,6 +9,94 @@ internal sealed record DoctorReport(
     IReadOnlyList<string> NotAttempted);
 
 /// <summary>
+/// What the target says about its cluster globals, as a claim and never as a
+/// finding. The doctor downloads nothing, so it cannot check any of this — the
+/// declaration exists only so that the sentence it prints about what it did not
+/// do is the right sentence.
+/// <para>
+/// <b>Why it is worth a flag at all.</b> Without one, a customer who answered
+/// <i>the roles are inside the artefact</i> on the form one screen earlier reads
+/// <i>no globals pattern was given, so nothing was looked for</i> — true to the
+/// letter, and it tells them their answer went nowhere. The four values are the
+/// control plane's own four, so there is nothing to map and nothing to drift.
+/// </para>
+/// </summary>
+internal enum GlobalsDeclaration
+{
+    /// <summary>Nobody said, which is also what an older control plane sends.</summary>
+    Unstated,
+
+    /// <summary>The artefact carries them. The drill's table of contents settles it.</summary>
+    Included,
+
+    /// <summary>A second artefact holds them, named by <c>--s3-globals-pattern</c>.</summary>
+    Separate,
+
+    /// <summary>There are none, and level 3's central assertion is out of reach by decision.</summary>
+    Absent,
+}
+
+internal static class GlobalsDeclarations
+{
+    /// <summary>
+    /// Spelled the way the control plane spells it, lower-cased, and a spelling
+    /// nobody declared is refused rather than read as <see
+    /// cref="GlobalsDeclaration.Unstated"/>. Falling back to the default would
+    /// mean a typo turning into the very sentence this option exists to stop
+    /// printing, and the customer would have no way to tell.
+    /// </summary>
+    public static GlobalsDeclaration Parse(string? value) => value switch
+    {
+        null => GlobalsDeclaration.Unstated,
+        "unknown" => GlobalsDeclaration.Unstated,
+        "included" => GlobalsDeclaration.Included,
+        "separate" => GlobalsDeclaration.Separate,
+        "absent" => GlobalsDeclaration.Absent,
+        _ => throw new UsageException(
+            $"--globals wants one of included, separate, absent or unknown, and '{value}' is none of them"),
+    };
+
+    /// <summary>
+    /// What the doctor says about the globals when it looked for nothing, and
+    /// <b>why</b> it looked for nothing — which is a different fact in each case.
+    /// <para>
+    /// This used to be one sentence for all four. It answered a target that had
+    /// said <i>the roles are inside the artefact</i> with <i>no globals pattern
+    /// was given</i>: true to the letter, and it reads as the answer having been
+    /// thrown away, because it had been. The doctor still checks nothing here in
+    /// any of these cases — it downloads nothing — and the list this goes into is
+    /// the half of the output somebody acts on.
+    /// </para>
+    /// </summary>
+    public static string NotLookedFor(GlobalsDeclaration declared) => declared switch
+    {
+        GlobalsDeclaration.Included =>
+            "the cluster globals: the target says the artefact carries them, so nothing was looked for beside it " +
+            "— correctly. Whether they are really in there is a fact inside the artefact, which the doctor does " +
+            "not download: the first drill reads the table of contents and settles it. See protocol/v1/GLOBALS.md.",
+
+        GlobalsDeclaration.Absent =>
+            "the cluster globals: the target says there are none, so nothing was looked for. Level 3's central " +
+            "question — which role is exempt from the policies you wrote — goes unanswered on this database by " +
+            "decision rather than by accident, and every report will say so. A pg_dumpall --globals-only artefact " +
+            "written beside the backup is what makes it answerable.",
+
+        // Reached only when the pattern is missing, which is a target
+        // contradicting itself: it says a second artefact holds them, and does
+        // not say which one.
+        GlobalsDeclaration.Separate =>
+            "the cluster globals: the target says a second artefact holds them and nothing names it, so nothing " +
+            "was looked for. Pass --s3-globals-pattern <glob>. Until then this is the one thing the target claims " +
+            "that nothing can act on.",
+
+        _ =>
+            "the cluster globals: no globals pattern was given, so nothing was looked for. Roles are cluster-wide " +
+            "and a per-database pg_dump does not carry them; without a second artefact a drill cannot say which " +
+            "role is exempt from the policies you wrote. See protocol/v1/GLOBALS.md.",
+    };
+}
+
+/// <summary>
 /// The first command anybody types, and it restores nothing and downloads
 /// nothing. Its job is to find out whether the keys and the configuration work,
 /// on the machine the drill will actually run on — which is why it is a
@@ -26,6 +114,7 @@ internal static class DoctorRunner
         string workRoot,
         string? assertionPack,
         string? globalsPattern,
+        GlobalsDeclaration declaredGlobals,
         CancellationToken cancellationToken)
     {
         var checks = new List<Check>();
@@ -126,10 +215,12 @@ internal static class DoctorRunner
         }
         else
         {
-            notAttempted.Add(
-                "the cluster globals: no globals pattern was given, so nothing was looked for. Roles are " +
-                "cluster-wide and a per-database pg_dump does not carry them; without a second artefact a drill " +
-                "cannot say which role is exempt from the policies you wrote. See protocol/v1/GLOBALS.md.");
+            // No pattern, so nothing was looked for — and *why* nothing was
+            // looked for is a different fact in each case. The old single
+            // sentence answered a target that said "the roles are inside the
+            // artefact" with "you gave me no pattern", which reads as its answer
+            // having been thrown away. It had been.
+            notAttempted.Add(GlobalsDeclarations.NotLookedFor(declaredGlobals));
         }
 
         if (rpoWindowHours is { } window)

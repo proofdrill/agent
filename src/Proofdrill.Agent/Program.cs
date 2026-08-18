@@ -246,6 +246,7 @@ async Task<int> DoctorAsync(CommandLine command, CancellationToken cancellationT
         command.Value("--work-dir") ?? DefaultWorkRoot(),
         command.Value("--assertions"),
         command.Value("--s3-globals-pattern"),
+        GlobalsDeclarations.Parse(command.Value("--globals")),
         cancellationToken).ConfigureAwait(false);
 
     if (command.Has("--json"))
@@ -985,6 +986,19 @@ static void Help()
           --control-plane <url>       fetch that key from /api/v1/keys instead
           --agent                     check the agent's own signature instead
           --canonical-only            write the signed bytes to stdout and stop
+
+        doctor options
+          --pg-major <n>              the major the target declares, checked against this image
+          --rpo-window-hours <n>      how old the backup is allowed to be, in hours
+          --globals <source>          what the target says about the cluster roles:
+                                      included, separate, absent or unknown. It changes
+                                      nothing the doctor checks — it downloads nothing, so
+                                      it cannot check any of it — and it changes what the
+                                      doctor says it did NOT check, which is the half of
+                                      the output somebody acts on.
+          --assertions <file>         check the shape of your pack, and restore nothing
+          --work-dir <path>           where the drill would put the throwaway cluster
+          --json                      print the report as JSON instead of prose
 
         run options
           --control-plane <url>       the origin you signed up at
